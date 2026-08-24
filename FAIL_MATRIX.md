@@ -34,7 +34,7 @@ you accuracy within a spend cap that is still enforced by arithmetic.
 | **Injection detector** | **FAIL-OPEN** → heuristic rules only | Judgment | Same reasoning; blunt cases still caught |
 | **Budget ledger** | **FAIL-CLOSED** → deny everything | Authority | Never permit unbounded spend. The system stops selling rather than sell without a limit. |
 | **Signature verification** | **FAIL-CLOSED** | Authority | Identity is not optional |
-| **Mandate store** | **FAIL-CLOSED** on miss; serve cached mandates read-only if the cache is warm | Authority | Cannot verify authority → cannot authorize |
+| **Mandate store** | **FAIL-CLOSED.** No cache, warm or otherwise. | Authority | Cannot verify authority → cannot authorize |
 | **Redis** | **DEGRADE** → stateless per-request policy + conservative global rate limit | Judgment | Lose behavioural context, keep authority |
 | **Postgres** | **FAIL-CLOSED** on writes | Authority | Cannot reserve budget → cannot authorize. See the note below: this also means the denial cannot be recorded. |
 | **LLM explainer** | **NO EFFECT** on decisions; explanations queue | Off-path | Proves the LLM is off-path. Killing it is a demo beat. |
@@ -42,6 +42,25 @@ you accuracy within a spend cap that is still enforced by arithmetic.
 | **Razorpay API** | Reservation held, decision recorded, retry with backoff; release on timeout | Authority | Never leak a reservation |
 
 ---
+
+## The mandate cache that is deliberately absent
+
+The source fail matrix reads *"FAIL-CLOSED on miss; serve cached mandates read-only if the
+cache is warm."* The second clause is **fail-open on authority**, and it is not transcribed
+here.
+
+A mandate can be revoked. Serving a cached copy while the store is unreachable means
+serving authority the principal has already withdrawn — and `openapi.yaml` promises `403`
+for a revoked mandate, which a warm cache cannot honour, because the revocation is exactly
+the write it cannot see. It also contradicts the rest of the design in the same breath:
+*"if Postgres dies we make no decisions"*, and the stage-2 row that says flat fail-closed.
+
+So the authority read path is uncached. If a cache is ever added it must be positive-only,
+short-TTL, and **bypassed entirely whenever the store is unreachable** — which is to say it
+is a latency optimisation for the healthy path and never a fallback for the broken one. It
+would also have to live somewhere: Redis holds only behavioural state by design, and an
+in-process cache is per-worker under `--workers 4`, so four workers would disagree about
+whether a mandate is revoked.
 
 ## Postgres down: the consequence the strategy package does not state
 
@@ -74,7 +93,7 @@ shows up as *absence*, never as a break.
 | Duplicate webhook | Absorbed by `idempotency_key UNIQUE` — the most common real payment-integration bug; explicitly tested |
 | Agent behaves unexpectedly but within mandate | **Allowed.** This is correct. Dwaar enforces authority, not taste. |
 | Conflicting signals (low risk score, policy deny) | **Policy wins.** Deterministic rules override probabilistic ones, always. |
-| Confidence low (0.55–0.80) | `step_up` — ask the principal rather than guess |
+| Risk **score** in the escalation band (0.55–0.80) | `step_up` — ask the principal rather than guess. Note this is the score, not confidence: calibrated confidence is a separate quantity and conflating them makes the escalation rule unimplementable. |
 | Clock skew between agent and gateway | ±120s tolerance; outside → deny with a distinct reason code |
 | Ledger row lock contention on a hot mandate | Serialised per mandate by design. If `UNIQUE (mandate_id, prev_entry_id)` ever raises, **the locking is wrong** and the database caught it instead of silently overspending. |
 | Two workers append to the chain simultaneously | Serialised by `pg_advisory_xact_lock(hashtext(merchant_id))`; `seq` allocated explicitly under the lock, never by `BIGSERIAL` |

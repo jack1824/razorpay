@@ -357,3 +357,61 @@ The demo's `kill_container` target was also corrected from `dwaar-ledger`, which
 container, to `dwaar-postgres`, which is — asserted against `docker-compose.yml` by
 `test_kill_target_matches_a_real_compose_container`, so the demo cannot again name a
 container that does not exist.
+
+---
+
+## 2026-08-24 — Day 0, package audit returns
+
+A wide adversarial audit of the strategy package (194 agents, 128 confirmed findings) was
+started before Phase 1 and landed after Phase 2 shipped. It independently reproduced the
+three schema defects already corrected in ADR 0001 — the no-op `REVOKE`, `BIGSERIAL`
+breaking the chain, and `TECH_STACK.md` naming the wrong lock target — which is reassuring
+about those three and about nothing else.
+
+It also found defects in work that was already written and pushed.
+
+---
+
+### F-012 — Three false claims were transcribed into this repo's own THREAT_MODEL and FAIL_MATRIX — FIXED
+
+**Found:** the package audit, after the documents had been committed and pushed.
+
+`THREAT_MODEL.md` and `FAIL_MATRIX.md` exist to stop the architecture drifting. They were
+written before any decision code, which was the right order — and three claims were carried
+across from the source without being checked against the rest of the design.
+
+1. **"continuous rather than thresholded scoring"**, listed as a mitigation for
+   policy-boundary probing. The design is explicitly thresholded:
+   `05_AI_ARCHITECTURE/AI_ARCHITECTURE.md:32` reads *"`0.55 ≤ score < 0.80` → `step_up` …
+   Above `0.80` → deny."* Those are precisely the clean edges a prober searches for. We
+   credited a control that does not exist, in the document whose job is preventing exactly
+   that kind of drift.
+
+2. **"serve cached mandates read-only if the cache is warm"**, as the mandate store's
+   failure behaviour. That is **fail-open on authority** — the one thing the document's own
+   governing sentence forbids — sitting in the same table cell as the words FAIL-CLOSED. A
+   mandate can be revoked; a warm cache cannot see the revocation, which is the write that
+   matters most, and `openapi.yaml` promises `403` for a revoked mandate.
+
+3. **"anchors bound the damage window"**, as recovery for audit-log tampering.
+   `chain_anchors` has no signature, no external witness, and lives in the same PostgreSQL
+   as the rows it anchors. An attacker who can rewrite records can rewrite anchors. It is
+   also cut item #3 if the schedule slips.
+
+**What we got wrong, and it is the more useful finding:** we reviewed the package's *schema*
+adversarially and its *prose* deferentially. Nine defects were caught by reading
+`schema.sql` against `timeline.json`; three were carried straight through from a threat
+table because a threat table reads like a conclusion rather than a claim. A mitigation
+column is an assertion about the system and deserves the same treatment as a CHECK
+constraint.
+
+**Fix:** all three removed, with the reasoning left in place under a heading — a deleted
+claim is invisible, and *why* it was deleted is the part worth keeping. Two additions came
+out of the same pass: auto-suspend (threat 1's recovery) is itself a DoS vector, since
+signature verification happens before authentication and anyone who learns an `agent_id`
+can suspend a legitimate agent with garbage signatures; and `agents.status` currently has no
+enforcement point because no stage reads it. Both recorded, both land day 4.
+
+Also corrected: the fail matrix said "Confidence low (0.55–0.80)". That band is the risk
+*score*. Calibrated confidence is a separate quantity, and conflating the two makes the
+escalation rule unimplementable.

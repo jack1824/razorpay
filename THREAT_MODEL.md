@@ -112,8 +112,8 @@ threats, and only one of them can be demonstrated.
 | 6 | **Tool injection via MCP** | Critical | Med | Scope map, default-deny for unlisted tools, amount check on outbound tools | Denied-scope counter | Record and alert |
 | 7 | **Budget circumvention via many small transactions** | High | High | **Cumulative** cap, not merely per-transaction. Both are arithmetic. | Ledger balance trend | The mandate exhausts; every further call denies |
 | 8 | **Race / double-spend** | Critical | Med | `SELECT ... FROM mandates FOR UPDATE` serialises per mandate; `CHECK (balance_after >= 0)`; `UNIQUE (mandate_id, prev_entry_id)` tripwire; `idempotency_key UNIQUE` | 50-writer concurrency test; the tripwire firing at all | Transaction rollback |
-| 9 | **Audit log tampering** | Critical | Low | Non-owner app role + hash chain + Ed25519 signature + independent verifier | Continuous chain verification | The chain break names the exact `seq`; anchors bound the damage window |
-| 10 | **Policy-boundary probing** | Med | High | Coarse reason codes outbound, fine-grained inbound; continuous rather than thresholded scoring; cumulative budget | Probe-pattern feature | Throttle |
+| 9 | **Audit log tampering** | Critical | Low | Non-owner app role + hash chain + Ed25519 signature + independent verifier | Continuous chain verification | The chain break names the exact `seq` |
+| 10 | **Policy-boundary probing** | Med | High | Coarse reason codes outbound, fine-grained inbound; **cumulative** budget; rate limiting | Probe-pattern feature | Throttle |
 | 11 | **Model hallucination** | Med | n/a | **The model cannot authorize anything. It can only tighten.** Authority is deterministic. | — | Structurally prevented |
 | 12 | **Rate-limit abuse / DoS** | Med | High | Redis token bucket per `(agent, principal)`; request body size caps enforced in middleware from day 1 | Prometheus counters | 429 + backoff |
 | 13 | **Credential theft (merchant token)** | Critical | Med | The MCP proxy means the agent never holds the raw token — **this is the product** | Anomalous tool mix | Rotate; the proxy bounds exposure meanwhile |
@@ -141,6 +141,33 @@ fixed here.
 
 **The console auth is a static token** and is not a real authentication system. Single
 tenant by design. Stated so nobody mistakes it for one.
+
+**Three claims were removed from this document rather than transcribed.** Each came from
+the source threat model and each is false against the rest of the design. They are recorded
+here because a deleted claim is invisible, and the reason it was deleted is the useful part.
+
+*"Continuous rather than thresholded scoring"* was listed as a mitigation for threat 10.
+The design is explicitly thresholded — `0.55 ≤ score < 0.80` escalates to `step_up`, above
+`0.80` denies — so those are exactly the clean edges a prober binary-searches for. Crediting
+a control that does not exist, in the document whose job is preventing drift, is worse than
+having no mitigation listed. The true answer is the one now in the table: coarse outbound
+reason codes, a cumulative cap, and rate limiting. It is also the stronger answer, because
+none of the three depends on the model.
+
+*"Anchors bound the damage window"* was listed as recovery for threat 9. `chain_anchors`
+carries no signature, has no external witness, and lives in the same PostgreSQL as the rows
+it anchors — an attacker who can rewrite records can rewrite anchors. Merkle anchoring is
+also cut item #3 if the schedule slips. An anchor bounds a damage window only when it is
+published somewhere the attacker does not control; ours is not, so the claim is removed
+until it is.
+
+**Auto-suspend is a denial-of-service vector, not only a recovery.** Threat 1's recovery is
+"auto-suspend the agent after N failures". N is unspecified, there is no counter store, and
+signature verification necessarily happens *before* the requester is authenticated — so
+anyone who learns an `agent_id` can suspend a legitimate agent by sending garbage
+signatures. Whatever N becomes, the counter must key on something the attacker cannot
+choose, and suspension must be reversible by the merchant. `agents.status` also currently
+has no enforcement point: no stage reads it. Both land with the crypto layer on day 4.
 
 ---
 
