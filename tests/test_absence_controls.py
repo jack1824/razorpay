@@ -163,3 +163,77 @@ def test_verify_is_no_longer_a_stub():
     assert block
     assert "exit 2" not in block.group(1)
     assert "verify_cli" in block.group(1)
+
+
+# ── BaseHTTPMiddleware is banned (F-015, F-021) ─────────────────────────────────────
+
+def test_no_middleware_uses_basehttpmiddleware():
+    """It broke this application twice, in two different ways.
+
+    F-015: it hands the route a different Request, so the body cap drained the body and
+    every POST arrived empty. F-021: `call_next` raises `No response returned` while a
+    long-lived StreamingResponse is open, so every SSE connection the console opened
+    returned a 500.
+
+    Two defects, one cause. Per the standing rule the fix is the layer — so this asserts
+    the layer, rather than trusting that nobody reaches for it again.
+    """
+    offenders = _find_basehttpmiddleware_usage(REPO_ROOT / "dwaar")
+    assert not offenders, (
+        "BaseHTTPMiddleware is banned in this application — it is incompatible with the "
+        "streaming responses the console depends on, and it hides the request body from "
+        "middleware that needs it. Write pure ASGI:\n" + "\n".join(offenders)
+    )
+
+
+#: Matches USAGE, not the word. `middleware.py` documents at length why the class is
+#: banned, and a bare-substring grep flagged its own explanation — the same way the
+#: pgcrypto check once matched the comment saying pgcrypto is not used. A source scan has
+#: to distinguish code from prose or it fails on the text that justifies it.
+_USAGE_PATTERNS = (
+    re.compile(r"^\s*from\s+starlette\.middleware\.base\s+import", re.M),
+    re.compile(r"^\s*class\s+\w+\(\s*BaseHTTPMiddleware\s*\)", re.M),
+    re.compile(r"^\s*import\s+starlette\.middleware\.base", re.M),
+)
+
+
+def _find_basehttpmiddleware_usage(root) -> list[str]:
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for pattern in _USAGE_PATTERNS:
+            for match in pattern.finditer(text):
+                line = text[: match.start()].count("\n") + 1
+                try:
+                    label = path.relative_to(REPO_ROOT)
+                except ValueError:
+                    label = path  # a synthetic probe outside the repo
+                offenders.append(f"  {label}:{line}")
+    return offenders
+
+
+def test_the_ban_check_would_catch_a_reintroduction(tmp_path):
+    """Positive control. The check must fire on real usage and stay silent on prose."""
+    package = tmp_path / "probe"
+    package.mkdir()
+
+    (package / "guilty.py").write_text(
+        "from starlette.middleware.base import BaseHTTPMiddleware\n\n"
+        "class Sneaky(BaseHTTPMiddleware):\n    pass\n",
+        encoding="utf-8",
+    )
+    assert _find_basehttpmiddleware_usage(package), (
+        "the ban check does not detect an actual import and subclass; it is enforcing "
+        "nothing"
+    )
+
+    (package / "guilty.py").unlink()
+    (package / "innocent.py").write_text(
+        '"""We do not use BaseHTTPMiddleware because it breaks streaming."""\n'
+        "# BaseHTTPMiddleware is banned here.\n",
+        encoding="utf-8",
+    )
+    assert not _find_basehttpmiddleware_usage(package), (
+        "the ban check fires on prose that merely mentions the class — the same failure "
+        "as a grep matching the comment that explains why something is absent"
+    )

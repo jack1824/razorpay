@@ -17,7 +17,7 @@ flowchart LR
     G["2.5 · AUTHORITY GATE<br/>pure arithmetic · no I/O"]:::done
     S3["3 · features<br/>Redis · degrade"]:::soon
     S4["4 · risk + injection<br/>LightGBM · fail-OPEN"]:::soon
-    S5["5 · policy<br/>compiled rules"]:::soon
+    S5["5 · policy<br/>compiled rules"]:::done
     S6["6 · budget reserve<br/>ARITHMETIC · fail-closed"]:::done
     S7["7 · decision<br/>pure function"]:::done
     S8["8 · hash + chain + SIGN"]:::done
@@ -30,8 +30,8 @@ flowchart LR
   S8 --> CH[(decision_records<br/>append-only by GRANT<br/>hash-chained per merchant)]:::done
   CH --> V[independent verifier CLI]:::soon
   GW -. async, off-path .-> EX[LLM explainer]:::soon
-  PC[LLM policy compiler<br/>OFFLINE · human-gated]:::soon -->|signed ruleset| S5
-  CON[console]:::soon -. SSE .-> GW
+  PC[LLM policy compiler<br/>Gemini · OFFLINE · human-gated]:::done -->|signed ruleset| S5
+  CON[console]:::done -. SSE .-> GW
 
   classDef done fill:#1a4d2e,stroke:#2d7a4a,color:#fff
   classDef soon fill:#2b2b2b,stroke:#555,color:#bbb
@@ -97,9 +97,9 @@ same failure mode as a hardcoded metric.
 
 ## Status
 
-Phases 1–4 are complete: repository, data model, a working `POST /v1/authorize` that
-verifies real RFC 9421 signatures and chains every decision it renders, and an independent
-verifier.
+Phases 1–5 are complete: repository, data model, a working `POST /v1/authorize` that
+verifies real RFC 9421 signatures and chains every decision it renders, an independent
+verifier, a deterministic policy engine with an offline LLM compiler, and a live console.
 
 **Deadline is 2 September.** Nine days, not fourteen.
 
@@ -107,10 +107,14 @@ verifier.
 |---|---|
 | `POST /v1/authorize` — 8 stages + arithmetic gate, per-stage timing | ✅ |
 | Signed, hash-chained decision records + chain verification | ✅ |
-| Latency gates in CI: pipeline p99 **3.60ms** vs a 25ms budget | ✅ |
+| Latency gates in CI: pipeline p99 **4.08ms** vs a 25ms budget | ✅ |
 | RFC 9421 inbound verification, key rotation overlap, replay defence | ✅ |
 | `make verify` — independent verifier, read-only, no write path | ✅ |
 | Idempotency scoped per mandate, namespaced against forgery | ✅ |
+| Deterministic policy engine — closed DSL, no `eval`, 0.012ms p99 | ✅ |
+| Policy compiler CLI — Gemini, generated tests, human gate | ✅ |
+| Console — decision stream, draining budget bars, NULL rendered | ✅ |
+| `/health` severity derived from the fail-matrix constant | ✅ |
 | Package skeleton, Compose, Makefile, CI | ✅ |
 | Structured JSON logging, per-request trace IDs, PII allowlist | ✅ |
 | `GET /health` | ✅ |
@@ -122,16 +126,18 @@ verifier.
 
 | Scheduled | Date |
 |---|---|
-| Policy engine + compiler CLI | 26 Aug |
 | Features + risk model | 27 Aug |
 | Agent zoo (4 agents; 2 held out, separate session) | 28 Aug |
 | Razorpay test mode + MCP proxy | 29 Aug |
-| Console, minimal async explainer, `make demo` | 30 Aug |
+| Async explainer, `make demo`, remaining console panels | 30 Aug |
 | `make eval` + fraud baseline + first held-out run | 31 Aug |
 | Hardening, README, video | 1 Sep |
 
 Cut deliberately, not "if behind": policy-compiler UI (CLI only), change-point detection for
 the sleeper, Merkle anchoring (hash chain only), console screen 6.
+
+See **`DEFENSE.md`** for six decisions that are not obvious, each with the alternative it
+rejected and what it costs.
 
 ## Four things worth reading the code for
 

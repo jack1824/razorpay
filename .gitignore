@@ -29,3 +29,7 @@ venv/
 
 # OS
 .DS_Store
+
+# Console
+console/node_modules/
+console/dist/

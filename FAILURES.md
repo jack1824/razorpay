@@ -669,3 +669,76 @@ ship in the same commit as its check.
 `make verify` currently reports PASS across 1,005 chained records, 8 mandates and the ledger
 invariants — and FAILs, naming the row, on a mutation of any single column across all three
 tables.
+
+---
+
+### F-006 — CLOSED as superseded
+
+The corrected strategy package never arrived, and it no longer matters. `tools/gen_seed.py`
+and `data/seed/` are this repo's own artifacts: the fixtures are generated here,
+deterministically, with the three corrections applied at the source, and
+`test_committed_seed_data_matches_the_generator` asserts they are regenerable rather than
+hand-edited.
+
+The vendored copy under `docs/strategy/` is frozen planning reference and is read by nothing
+— not the build, not the tests, not the runtime. Its staleness now affects nothing, so
+tracking it as an open defect would be tracking a difference that cannot cause a failure.
+
+Closed. Not fixed — superseded.
+
+---
+
+## 2026-08-24 — Phase 5: policy engine, compiler, console
+
+Two defects, both in middleware, both found by building the console against the running
+system rather than by a test. That is the justification for pulling the console forward
+holding up: neither would have surfaced from the API alone.
+
+---
+
+### F-021 — `BaseHTTPMiddleware` broke every SSE connection — FIXED
+
+**Found:** the first time the console opened the decision stream. HTTP 500,
+`RuntimeError: No response returned` from inside Starlette.
+
+`TraceIDMiddleware` was a `BaseHTTPMiddleware`. Its `call_next` awaits a *completed*
+response, which never arrives for a `StreamingResponse` that stays open — and an SSE
+connection stays open for the length of a demo.
+
+**What we got wrong, and it is the same thing twice:** F-015 was also `BaseHTTPMiddleware`,
+in the body cap, hiding the request body from the route. Two defects, two different
+symptoms, one cause. Phase 4's ADR entry says it explicitly — *when a bug appears in a
+second location, the fix belongs at the layer where a third becomes impossible* — and this
+is that layer.
+
+**Fix:** both middlewares are pure ASGI. `TraceIDMiddleware` now wraps `send` rather than
+awaiting a response, so the access line is written when the response *starts*. A test bans
+`BaseHTTPMiddleware` from `dwaar/` outright, with a positive control.
+
+---
+
+### F-022 — Our own size cap made every endpoint look disconnected — FIXED
+
+**Found:** immediately after F-021. The stream no longer 500'd; it returned 200, delivered
+nothing, and closed.
+
+`BodySizeLimitMiddleware` buffers the request body and hands the route a `replay()`
+callable. After replaying the body it returned `{"type": "http.disconnect"}` on every
+subsequent call — which seemed harmless, since a request body is read once.
+
+It is not harmless. `request.is_disconnected()` calls `receive()`. So the moment the SSE
+generator asked whether the client had gone away, it was told yes, and returned. **The one
+endpoint in the system that genuinely needs to detect a disconnect was the one this made
+incapable of it.**
+
+**What we got wrong:** the middleware answered a question it had no business answering. Its
+job ends when the body has been handed over; after that it must be transparent. Returning
+`http.disconnect` was a middleware asserting something about the *client* on the basis of
+its own internal state.
+
+**Fix:** `replay()` delegates to the real `receive` once the body is exhausted. A regression
+test asserts the delegation is present and the fabricated disconnect is gone.
+
+**Worth noting about how it was found:** both of these are interaction bugs between two
+components that are individually correct and individually tested. Nothing short of running
+the real console against the real API would have produced either.

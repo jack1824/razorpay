@@ -14,16 +14,18 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from psycopg_pool import AsyncConnectionPool
 from redis.asyncio import Redis
 
 from dwaar import __version__
 from dwaar.api.middleware import BodySizeLimitMiddleware, TraceIDMiddleware
-from dwaar.api.routes import authorize, health
+from dwaar.api.routes import authorize, console, health
 from dwaar.config import Settings, get_settings
 from dwaar.crypto.signer import derive_signer, ensure_registered
 from dwaar.logging import configure_logging, get_logger
 from dwaar.nonce import RedisNonceStore
+from dwaar.policy.store import PolicyStore
 
 log = get_logger("dwaar.api")
 
@@ -68,6 +70,10 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     app.state.nonce_store = RedisNonceStore(redis)
 
+    # One store per process, TTL-bounded. Hot-reloadable without a restart; replaced
+    # wholesale so a request never sees a half-swapped ruleset.
+    app.state.policy_store = PolicyStore()
+
     log.info("startup", version=__version__, component="api")
     try:
         yield
@@ -98,8 +104,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
     app.add_middleware(TraceIDMiddleware)
 
+    # The vite dev server runs on another port, so the console needs CORS in local
+    # development. Scoped to localhost origins and to the console's read endpoints —
+    # `/v1/authorize` is signed, so a browser origin cannot forge one either way.
+    if settings.env == "local":
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_methods=["GET"],
+            allow_headers=["*"],
+        )
+
     app.include_router(health.router, tags=["ops"])
     app.include_router(authorize.router, tags=["authorize"])
+    app.include_router(console.router)
     return app
 
 

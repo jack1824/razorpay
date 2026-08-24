@@ -29,9 +29,10 @@ from dwaar.authorize.stages import (
 )
 from dwaar.authorize.types import AuthorizeRequest
 
-STUB_MODULES = [features, risk, policy]
-# signature became REAL on 25 Aug: `signature_unverified` no longer appears on any record.
-REAL_MODULES = [signature, mandate, authority, ledger, decision, record]
+STUB_MODULES = [features, risk]
+# signature became REAL on 25 Aug and policy on 26 Aug, so neither token appears on any
+# record any more.
+REAL_MODULES = [signature, mandate, authority, policy, ledger, decision, record]
 
 REQ = AuthorizeRequest(
     agent_id="agt_000000000001",
@@ -117,12 +118,10 @@ async def test_risk_stub_returns_none_not_zero():
     assert result.degraded == risk.DEGRADED_TOKEN
 
 
-async def test_policy_stub_permits_and_reports_no_compiled_policy():
-    result = await policy.evaluate_policy(REQ, {}, None)
-    assert result.verdict == "permit"
-    assert result.policy_version == policy.NO_COMPILED_POLICY == 0
-    assert result.rule_fired is None
-    assert result.degraded == policy.DEGRADED_TOKEN
+def test_no_stage_still_claims_a_stubbed_policy():
+    """Stage 5 is real. The token must be gone from the registry, not merely unused."""
+    assert "policy_stubbed" not in pipeline.STUB_STAGES.values()
+    assert not hasattr(policy, "DEGRADED_TOKEN")
 
 
 def test_policy_version_zero_and_null_mean_different_things():

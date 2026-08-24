@@ -105,6 +105,7 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
                 method=request.method,
                 path=request.url.path,
                 nonce_store=app.state.nonce_store,
+                policy_store=app.state.policy_store,
             )
         except pipeline.Unauthenticated:
             await conn.rollback()

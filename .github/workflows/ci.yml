@@ -90,6 +90,14 @@ jobs:
             tests/crypto/test_http_sig.py \
             tests/db/test_signature_stage.py
 
+      - name: Policy engine — deterministic, and policy beats the model
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/policy/ tests/db/test_policy_lifecycle.py
+
+      - name: Console builds
+        run: cd console && npm ci && npm run build
+
       - name: Demo beat 2 — arithmetic deny, model never consulted
         run: |
           python -m pytest -q -p no:cacheprovider \

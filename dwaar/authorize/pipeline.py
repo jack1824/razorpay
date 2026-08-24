@@ -43,12 +43,17 @@ from dwaar.errors import ChainError
 from dwaar.logging import get_logger
 from dwaar.metrics import authorize_duration, decisions_total, stage_duration
 from dwaar.nonce import NonceStore
+from dwaar.policy.store import PolicyStore
 
 log = get_logger("dwaar.authorize")
 
 # Not a stage in the ARCHITECTURE table: it is a short-circuit that runs before the work,
 # so it is named separately and still timed.
 REPLAY_STAGE = "replay_lookup"
+
+# Process-wide fallback so a caller that does not manage one still gets caching rather
+# than a database round trip per request. The API supplies its own via app.state.
+_DEFAULT_POLICY_STORE = PolicyStore()
 
 # The stage names, in order. `tests/test_stub_contracts.py` enumerates this rather than a
 # hand-written list, so a stage added without a degradation token cannot slip through.
@@ -65,11 +70,11 @@ STAGE_ORDER: tuple[str, ...] = (
     record_stage.STAGE_NAME,
 )
 
-# Stage 1 became real on 25 Aug: `signature_unverified` no longer appears on any record.
+# Stage 1 became real on 25 Aug and stage 5 on 26 Aug, so `signature_unverified` and
+# `policy_stubbed` no longer appear on any record.
 STUB_STAGES: dict[str, str] = {
     features_stage.STAGE_NAME: features_stage.DEGRADED_TOKEN,
     risk_stage.STAGE_NAME: risk_stage.DEGRADED_TOKEN,
-    policy_stage.STAGE_NAME: policy_stage.DEGRADED_TOKEN,
 }
 
 
@@ -164,6 +169,7 @@ async def authorize(
     method: str = "POST",
     path: str = "/v1/authorize",
     nonce_store: NonceStore | None = None,
+    policy_store: PolicyStore | None = None,
     now: datetime | None = None,
 ) -> PipelineOutcome:
     """Run the pipeline. The caller owns the transaction and commits on success."""
@@ -250,7 +256,15 @@ async def authorize(
 
             policy = await timer.run(
                 policy_stage.STAGE_NAME,
-                policy_stage.evaluate_policy(request, mandate.mandate, risk, conn=conn),
+                policy_stage.evaluate_policy(
+                    request,
+                    mandate.mandate,
+                    risk,
+                    conn=conn,
+                    store=policy_store or _DEFAULT_POLICY_STORE,
+                    merchant_id=mandate.merchant_id,
+                    features=features.features,
+                ),
             )
             executed.append(policy_stage.STAGE_NAME)
             if policy.degraded:

@@ -325,3 +325,52 @@ on its first run.
 
 `tests/test_absence_controls.py` is the audit. Adding a guard that asserts an absence means
 adding its control there — a synthetic input that the guard must reject.
+
+---
+
+## Two recurring patterns, added 2026-08-24 (Phase 5)
+
+These are named because each has now produced more than one defect, and naming a pattern is
+what stops the next instance.
+
+### 1. Structural over behavioural — "chooses not to" is a promise; "cannot" is a property
+
+Every control in this repo that has held up is structural. Every one that had to be fixed
+was behavioural.
+
+| Control | Behavioural version (rejected or fixed) | Structural version (shipped) |
+|---|---|---|
+| Append-only audit log | `REVOKE ... FROM PUBLIC`, which revokes nothing | `dwaar_app` is **not the table owner** and holds `SELECT, INSERT` |
+| Authority immutability | table-wide `UPDATE` on `mandates` "only used for revocation" | column-level `GRANT UPDATE (revoked_at)` |
+| No LLM in the hot path | monkeypatch the client and count calls | static import closure: it is **not reachable** |
+| Offence/defence separation | "don't import `zoo`" | import-closure test with a positive control |
+| Independent verifier | a verifier that only issues SELECTs (F-020) | `default_transaction_read_only` as a **connection option** |
+| Client idempotency keys | validate agent input for reserved prefixes | prefix every client key `rsv:` — namespaces **cannot** overlap |
+| `risk_score IS NULL` on a cap breach | rely on stage ordering | an arithmetic gate that **short-circuits** stages 3–6 |
+
+The rule: **when a control can be expressed as something the system is unable to do rather
+than something it declines to do, express it that way.** A behavioural control is a rule
+someone can forget at a new call site. A structural one is a property of the system that a
+new call site inherits.
+
+The corollary, which matters just as much: a structural control must be *testable as
+structural*. That is why the import-closure tests carry positive controls, and why the
+read-only verifier is asserted by attempting a real write.
+
+### 2. When a bug appears in a second location, fix the layer, not the field
+
+F-019: `created_at` failed to normalise to UTC before signing. Phase 3 fixed `created_at`.
+The same bug then appeared in `mandates.expires_at`, because the fix had been applied to the
+*field* rather than to the *rule*.
+
+**The general form: the second occurrence of a bug is evidence about the layer, not about
+the location.** The fix belongs wherever a third occurrence becomes impossible — for F-019,
+inside `build_payload`, which every signed payload passes through.
+
+The same reasoning produced `dwaar/crypto/integrity.py`. `mandates`, `decision_records` and
+`policies` were three instances of one defect: a signed blob diverging from the columns an
+application reads. Fixing them individually would have left the fourth table to be found by
+whoever built it. One helper plus a registry, with a test asserting the registry is
+complete, is the layer at which a fourth instance cannot happen quietly.
+
+When a defect log shows the same shape twice, stop fixing instances.

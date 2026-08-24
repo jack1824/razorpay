@@ -1,0 +1,147 @@
+/* Legible on a projector at 1080p. That is the whole brief: large type, high contrast,
+   no animation that competes with the numbers. When it is legible it is done. */
+
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --panel-2: #1c2129;
+  --line: #2d333b;
+  --text: #e6edf3;
+  --muted: #8b949e;
+
+  --allow: #2ea043;
+  --deny: #f85149;
+  --bound: #d29922;
+  --step-up: #a371f7;
+  --throttle: #db6d28;
+
+  --critical: #f85149;
+  --degraded: #d29922;
+  --nominal: #3fb950;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  display: flex; align-items: center; gap: 24px;
+  padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+header h1 { margin: 0; font-size: 20px; letter-spacing: 0.5px; }
+header .tag { color: var(--muted); font-size: 14px; }
+
+nav { display: flex; gap: 8px; margin-left: auto; }
+nav button {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  padding: 8px 18px; font: inherit; font-size: 15px; cursor: pointer; border-radius: 6px;
+}
+nav button[data-active="true"] { background: var(--panel-2); color: var(--text); border-color: #4b5563; }
+
+.health { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+.dot.nominal { background: var(--nominal); }
+.dot.degraded { background: var(--degraded); }
+.dot.critical { background: var(--critical); }
+
+main { flex: 1; overflow: auto; padding: 20px 24px; }
+
+/* ── decision stream ──────────────────────────────────────────────────────────── */
+
+table { width: 100%; border-collapse: collapse; font-size: 17px; }
+th {
+  text-align: left; color: var(--muted); font-weight: 500; font-size: 14px;
+  text-transform: uppercase; letter-spacing: 1px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg);
+}
+td { padding: 11px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--panel); }
+tbody tr[data-fresh="true"] { background: rgba(46, 160, 67, 0.07); }
+
+.chip {
+  display: inline-block; padding: 3px 12px; border-radius: 4px;
+  font-size: 15px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase;
+}
+.chip.allow { background: rgba(46, 160, 67, 0.18); color: var(--allow); }
+.chip.deny { background: rgba(248, 81, 73, 0.18); color: var(--deny); }
+.chip.bound { background: rgba(210, 153, 34, 0.18); color: var(--bound); }
+.chip.step_up { background: rgba(163, 113, 247, 0.18); color: var(--step-up); }
+.chip.throttle { background: rgba(219, 109, 40, 0.18); color: var(--throttle); }
+
+.rule { color: var(--muted); font-size: 15px; }
+.rule.mandate { color: var(--bound); }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+/* THE point of the whole artifact: a NULL risk score is rendered as the literal word,
+   because it is the audit-trail proof that the model was never consulted. A blank cell
+   would read as "we forgot to fill it in". */
+.null-literal {
+  color: var(--bound); font-weight: 700; letter-spacing: 1.5px;
+  border: 1px dashed var(--bound); padding: 1px 8px; border-radius: 3px; font-size: 14px;
+}
+
+/* ── agent roster ─────────────────────────────────────────────────────────────── */
+
+.roster { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 18px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 18px 20px; }
+.card h3 { margin: 0 0 4px; font-size: 19px; }
+.card .id { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+
+.bar-label { display: flex; justify-content: space-between; font-size: 15px; margin-bottom: 6px; }
+.bar-label .spent { color: var(--muted); }
+.bar {
+  height: 26px; background: var(--panel-2); border-radius: 4px; overflow: hidden;
+  border: 1px solid var(--line);
+}
+/* The fill DRAINS: width is what remains, so a denied request visibly does not move it.
+   The transition is slow enough to read on a projector and short enough not to lag the
+   decision that caused it. */
+.bar > .fill {
+  height: 100%; background: var(--allow);
+  transition: width 600ms ease-out, background-color 300ms linear;
+}
+.bar > .fill[data-low="true"] { background: var(--bound); }
+.bar > .fill[data-empty="true"] { background: var(--deny); }
+
+.card .meta { display: flex; gap: 22px; margin-top: 14px; font-size: 14px; color: var(--muted); }
+.card .meta b { color: var(--text); font-weight: 600; }
+
+/* ── detail ───────────────────────────────────────────────────────────────────── */
+
+.detail-backdrop {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6);
+  display: flex; justify-content: flex-end;
+}
+.detail {
+  width: 620px; max-width: 92vw; height: 100%; overflow: auto;
+  background: var(--panel); border-left: 1px solid var(--line); padding: 22px 26px;
+}
+.detail h2 { margin: 0 0 18px; font-size: 21px; }
+.detail dl { display: grid; grid-template-columns: 190px 1fr; gap: 9px 16px; margin: 0 0 22px; font-size: 15px; }
+.detail dt { color: var(--muted); }
+.detail dd { margin: 0; word-break: break-all; }
+.detail section { border-top: 1px solid var(--line); padding-top: 16px; margin-top: 16px; }
+.detail h4 { margin: 0 0 10px; font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; }
+.detail pre {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 12px; font-size: 13px; overflow-x: auto; margin: 0; white-space: pre-wrap;
+  word-break: break-all;
+}
+.detail .close {
+  float: right; background: transparent; border: 1px solid var(--line); color: var(--muted);
+  font: inherit; cursor: pointer; border-radius: 4px; padding: 4px 12px;
+}
+.tokens { display: flex; flex-wrap: wrap; gap: 6px; }
+.token {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+  padding: 2px 9px; font-size: 13px; color: var(--muted);
+}
+.empty { color: var(--muted); padding: 40px 0; text-align: center; font-size: 16px; }

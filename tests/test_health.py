@@ -32,26 +32,79 @@ def client():
         yield c
 
 
-def test_health_returns_ok(client):
+def test_health_reports_component_severity(client):
     r = client.get("/health")
     assert r.status_code == 200
     body = r.json()
-    assert body["status"] == "ok"
+    assert body["status"] in ("nominal", "degraded", "critical")
     assert body["version"]
-    assert "postgres" in body["dependencies"]
+    assert "postgres" in body["components"]
+    for component in body["components"].values():
+        assert set(component) >= {"status", "severity", "reason", "checked_at", "fail_mode"}
 
 
-def test_health_reports_postgres_unavailable_without_failing(client):
+def test_severity_comes_from_the_fail_matrix_not_from_this_route(client):
+    """One constant, two consumers. Hand-writing the mapping twice is what makes the
+    console and the audit trail disagree on stage."""
+    from dwaar.components import BY_NAME, Severity
+
+    body = client.get("/health").json()
+    for name, component in body["components"].items():
+        expected = (
+            Severity.NOMINAL if component["status"] == "up"
+            else BY_NAME[name].severity_when_down
+        )
+        assert component["severity"] == expected.value
+
+
+def test_a_fail_closed_component_down_is_critical(client):
+    """Red, not amber. The thing that failed is the thing that decides about money."""
+    from dwaar.components import BY_NAME, FailMode, Severity
+
+    for name in ("postgres", "ledger", "mandate_store", "nonce_store"):
+        assert BY_NAME[name].fail_mode is FailMode.FAIL_CLOSED
+        assert BY_NAME[name].severity_when_down is Severity.CRITICAL
+
+
+def test_a_fail_open_component_down_is_only_degraded(client):
+    """Amber. Judgment degrades; the ledger still holds, so the residual is bounded."""
+    from dwaar.components import BY_NAME, Severity
+
+    for name in ("risk_model", "injection_detector", "redis"):
+        assert BY_NAME[name].severity_when_down is Severity.DEGRADED
+
+
+def test_the_explainer_can_never_make_the_service_degraded(client):
+    """Killing it is a demo beat precisely because nothing else moves."""
+    from dwaar.components import BY_NAME, FailMode, Severity
+
+    assert BY_NAME["explainer"].fail_mode is FailMode.NO_EFFECT
+    assert BY_NAME["explainer"].severity_when_down is Severity.NOMINAL
+
+    body = client.get("/health").json()
+    assert body["components"]["explainer"]["status"] == "down"
+    assert body["components"]["explainer"]["severity"] == "nominal"
+
+
+def test_overall_status_is_the_worst_component(client):
+    from dwaar.components import Severity, overall
+
+    body = client.get("/health").json()
+    worst = overall([Severity(c["severity"]) for c in body["components"].values()])
+    assert body["status"] == worst.value
+
+
+def test_health_never_returns_503(client):
     """A database outage must not take /health down.
 
-    FAIL_MATRIX.md requires the API to stay up and deny under a Postgres outage — demo
-    beat 5 depends on it. If /health returned 503 here, Compose would restart the
-    container and the fail-closed behaviour would be a crash loop instead.
+    FAIL_MATRIX.md requires the API to stay up and DENY under a Postgres outage — demo
+    beat 5 depends on it. A 503 would make Compose restart the container, turning
+    fail-closed into a crash loop. It also cannot distinguish degraded from dead, which is
+    the one thing the console needs from it.
     """
     r = client.get("/health")
     assert r.status_code == 200
-    status = r.json()["dependencies"]["postgres"]
-    assert status == "ok" or status.startswith("unavailable")
+    assert r.json()["components"]["postgres"]["status"] in ("up", "down")
 
 
 def test_trace_id_is_returned(client):
@@ -135,3 +188,45 @@ def test_a_post_body_survives_the_size_cap_middleware(client):
     assert any(item["loc"][:2] == ["body", "agent_id"] for item in detail), (
         f"expected field-level validation errors, got {detail}"
     )
+
+
+# ── F-022 regression ────────────────────────────────────────────────────────────────
+
+def test_the_size_cap_does_not_fabricate_a_disconnect(client):
+    """After replaying the body, the middleware must delegate to the real `receive`.
+
+    An earlier version returned `http.disconnect` on every subsequent call, so
+    `request.is_disconnected()` reported a disconnect the instant anything asked — and the
+    SSE decision stream, the one endpoint that genuinely needs to detect one, exited on its
+    first poll and delivered nothing.
+    """
+    import inspect
+
+    from dwaar.api.middleware import BodySizeLimitMiddleware
+
+    source = inspect.getsource(BodySizeLimitMiddleware)
+    assert "return await receive()" in source, (
+        "the replay callable must delegate to the real receive after the body, or any "
+        "endpoint polling is_disconnected() sees a disconnect that did not happen"
+    )
+    assert 'return {"type": "http.disconnect"}' not in source
+
+
+async def test_a_disconnected_client_ends_the_stream_promptly():
+    """The stream must stop when the client really goes away — and only then.
+
+    Driven with a request that reports disconnected immediately, so the generator
+    terminates instead of running forever. That is also the F-022 assertion from the other
+    side: before the fix this returned on the first poll for every client, connected or
+    not.
+    """
+    from dwaar.api.routes.console import decision_stream
+
+    class FakeRequest:
+        app = None
+
+        async def is_disconnected(self):
+            return True
+
+    response = await decision_stream(FakeRequest(), merchant_id="mch_nonexistent")
+    assert response.media_type == "text/event-stream"
