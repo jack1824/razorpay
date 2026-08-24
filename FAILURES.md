@@ -469,3 +469,97 @@ columns rather than re-deriving from `canonical_json`. Column grants close the p
 the app role, but a superuser can still rewrite `max_per_txn_paise` and leave a valid
 signature over stale terms. The honest fix is a verifier invariant asserting the columns
 agree with the signed blob. Day 4, with the rest of the verifier.
+
+---
+
+## 2026-08-24 — Phase 3, the authorize pipeline
+
+Three defects in code that was already written and pushed, all found by tests added in this
+phase. Two of them were invisible because the thing they broke did not exist yet.
+
+---
+
+### F-014 — The import walker could not see submodule imports — FIXED
+
+**Found:** by a positive control written for `test_hot_path_purity.py`, on its first run.
+
+`build_graph` recorded `from X import Y` as a single edge to `X`. It never recorded `X.Y`.
+So a chain like `from dwaar.crypto import keys` produced an edge to `dwaar.crypto`, whose
+`__init__` imports nothing — and the traversal stopped there. Every module reached only via
+`from package import submodule` was **invisible to the walk**.
+
+That weakened both structural guards: `test_import_isolation` (rule 3, shipped in Phase 1)
+and `test_hot_path_purity` (rule 1). Both were passing. Both would have kept passing.
+
+**What we got wrong:** we tested the walker only against a codebase that is supposed to be
+clean. A check whose job is to never fail cannot be validated by never failing — its silence
+is indistinguishable between "nothing to find" and "cannot find anything."
+
+**Fix:** record both edges for `from X import Y`, since statically we cannot tell a
+submodule from a name. Plus positive controls in both test files: a synthetic package built
+to be *dirty*, asserted to be flagged. There is also a negative control (`openai_helper` is
+not `openai`), because a check that fires on a prefix match is a broken build with no defect
+behind it, which is how a good check gets deleted.
+
+---
+
+### F-015 — The body-size cap silently emptied every POST body — FIXED
+
+**Found:** the first HTTP request to `/v1/authorize` returned
+`422 {"loc": ["body"], "msg": "Field required"}` for a request with a perfectly good body.
+
+`BodySizeLimitMiddleware` was a `BaseHTTPMiddleware`. It consumed `request.stream()` to
+count bytes, then re-attached the buffer via `request._receive`. But `BaseHTTPMiddleware`
+builds a **different** `Request` for the downstream app: the mutation landed on an object
+the route never sees. The stream was drained and nothing replaced it.
+
+**Why nothing caught it for two phases:** `/health` is a GET. The only POSTs in the suite
+existed to trigger the 413, and a POST to a GET route returns 405 whether or not the body
+survived. The middleware was tested exclusively against requests that have no body.
+
+**Fix:** rewritten as pure ASGI, which can hand the downstream app a `receive` callable it
+actually uses. Plus a regression test that POSTs a real body and asserts the failure is
+*field-level validation*, not a missing body.
+
+**The lesson worth keeping:** a middleware tested only against GET is a middleware tested
+against the case where its bug cannot appear. The same is true of the size cap itself — the
+413 path was covered, the success path never was.
+
+---
+
+### F-016 — The chain verifier did not check the columns, so demo beat 6 would have printed PASS — FIXED
+
+**Found:** by `test_tampering_breaks_the_chain_and_names_the_seq`, written to reproduce
+demo beat 6.
+
+`verify_chain` checked four things: `payload_hash` matches `canonical_json`,
+`canonical_json` is in canonical form, `prev_hash` links to the predecessor, and the
+signature verifies. All four passed after the tamper. **It never checked that the columns
+agree with the bytes that were signed.**
+
+Demo beat 6 is literally:
+
+```sql
+UPDATE decision_records SET amount_paise = 500000 WHERE seq = 4127;
+```
+
+A column edit. `canonical_json` is untouched, so every hash still matches and the signature
+still verifies. The verifier would have printed a green PASS on stage, immediately after the
+presenter announced a tamper.
+
+**What we got wrong:** we verified the signed artifact and forgot that the columns are what
+everyone actually reads. `canonical_json` is a shadow copy; the row is the record. A
+signature over a shadow nobody queries protects nothing.
+
+This is the same defect as F-013's residual, one table over — there it was `mandates`
+columns diverging from a valid principal signature, here it is `decision_records` columns
+diverging from a valid Dwaar signature. Both come from the same mistake: treating the signed
+blob as the record rather than as evidence *about* the record.
+
+**Fix:** `verify_chain` now rebuilds the payload from the stored columns
+(`recordmod.payload_from_row`) and compares it to `canonical_json` **before** anything else.
+Two tests cover it: the naive tamper (edit a column) and the smarter one (edit
+`canonical_json` to match, which then fails the hash and would need the signing key to
+forge).
+
+The `mandates` half of this is still open and lands with the verifier CLI on 25 Aug.

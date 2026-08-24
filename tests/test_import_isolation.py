@@ -75,3 +75,50 @@ def test_zoo_readme_states_localhost_only():
     assert readme.is_file(), "zoo/README.md must exist"
     text = readme.read_text(encoding="utf-8").lower()
     assert "localhost" in text, "zoo/README.md must state that it targets localhost only"
+
+
+def test_the_walker_can_actually_find_a_zoo_import(tmp_path):
+    """Positive control.
+
+    This test's job is to never fail, which is exactly the kind of test that can quietly
+    stop enforcing anything. Asserting against `dwaar/` cannot detect that, because
+    `dwaar/` is supposed to be clean. A package built to be dirty can.
+
+    It found a real defect the first time it ran: the walker recorded `from X import Y` as
+    an edge to `X` only, so submodule imports were invisible to traversal. See F-014.
+    """
+    from tests._support.importgraph import build_synthetic_package
+
+    dirty = build_synthetic_package(
+        tmp_path,
+        "isolation_probe",
+        {
+            "gateway": "from isolation_probe import helper",
+            "helper": "import zoo.agents.compromised",
+        },
+    )
+    found = find_path_to(dirty, "isolation_probe.gateway", FORBIDDEN)
+    assert found is not None, (
+        "the walker failed to find a zoo import two hops away; rule 3's only guard is "
+        "therefore enforcing nothing"
+    )
+
+
+def test_exact_membership_would_not_have_caught_a_submodule_import(tmp_path):
+    """The specific weakness the strategy package's version of this test had.
+
+    `assert "zoo" not in transitive_imports(mod)` is exact-element membership, so
+    `import zoo.agents.compromised` passes it clean. This asserts our matcher is a prefix
+    match, not an equality check.
+    """
+    from tests._support.importgraph import build_synthetic_package, transitive_imports
+
+    dirty = build_synthetic_package(
+        tmp_path, "membership_probe", {"gateway": "import zoo.agents.compromised"}
+    )
+    imports = transitive_imports(dirty, "membership_probe.gateway")
+
+    # The naive check passes — which is the point.
+    assert "zoo" not in imports
+    # Ours does not.
+    assert find_path_to(dirty, "membership_probe.gateway", FORBIDDEN) is not None

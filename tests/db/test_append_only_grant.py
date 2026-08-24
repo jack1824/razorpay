@@ -20,29 +20,14 @@ import pytest
 from psycopg.errors import InsufficientPrivilege
 
 from dwaar.db.repositories import decision_records
-from tests.conftest import rand_hash, rand_sig
 
 pytestmark = pytest.mark.db
 
 
-async def _seed_record(conn, make_mandate, make_signing_key, merchant_id="mch_grant01"):
+async def _seed_record(conn, make_mandate, write_record, merchant_id="mch_grant01"):
     mandate = await make_mandate(conn, merchant_id=merchant_id)
-    key_id = await make_signing_key(conn)
-    return await decision_records.append(
-        conn,
-        merchant_id=merchant_id,
-        payload_hash=rand_hash(),
-        signature=rand_sig(),
-        signing_key_id=key_id,
-        agent_id=mandate["agent_id"],
-        principal_id=mandate["principal_id"],
-        mandate_hash=mandate["mandate_hash"],
-        request_digest=rand_hash(),
-        decision="allow",
-        features={"velocity": 1},
-        policy_version=1,
-        latency_us=4200,
-        amount_paise=124_000,
+    return await write_record(
+        conn, merchant_id=merchant_id, mandate=mandate, amount_paise=124_000
     )
 
 
@@ -79,9 +64,9 @@ async def test_app_role_has_exactly_select_and_insert(app_conn):
     )
 
 
-async def test_update_raises_insufficient_privilege(app_conn, make_mandate, make_signing_key):
+async def test_update_raises_insufficient_privilege(app_conn, make_mandate, write_record):
     """THE acceptance criterion."""
-    record = await _seed_record(app_conn, make_mandate, make_signing_key)
+    record = await _seed_record(app_conn, make_mandate, write_record)
 
     with pytest.raises(InsufficientPrivilege):
         async with app_conn.cursor() as cur:
@@ -91,8 +76,8 @@ async def test_update_raises_insufficient_privilege(app_conn, make_mandate, make
             )
 
 
-async def test_delete_raises_insufficient_privilege(app_conn, make_mandate, make_signing_key):
-    record = await _seed_record(app_conn, make_mandate, make_signing_key)
+async def test_delete_raises_insufficient_privilege(app_conn, make_mandate, write_record):
+    record = await _seed_record(app_conn, make_mandate, write_record)
 
     with pytest.raises(InsufficientPrivilege):
         async with app_conn.cursor() as cur:
@@ -137,9 +122,9 @@ async def test_budget_ledger_is_also_append_only(app_conn, make_mandate):
                 )
 
 
-async def test_insert_and_select_still_work(app_conn, make_mandate, make_signing_key):
+async def test_insert_and_select_still_work(app_conn, make_mandate, write_record):
     """The control must not break the application it protects."""
-    record = await _seed_record(app_conn, make_mandate, make_signing_key)
+    record = await _seed_record(app_conn, make_mandate, write_record)
     fetched = await decision_records.get(app_conn, record["record_id"])
     assert fetched is not None
     assert fetched["decision"] == "allow"
@@ -147,7 +132,7 @@ async def test_insert_and_select_still_work(app_conn, make_mandate, make_signing
 
 
 async def test_superuser_can_tamper_because_the_demo_requires_it(
-    superuser_dsn, app_conn, make_mandate, make_signing_key
+    superuser_dsn, app_conn, make_mandate, write_record
 ):
     """Demo beat 6: the tamper MUST succeed at the database.
 
@@ -155,7 +140,7 @@ async def test_superuser_can_tamper_because_the_demo_requires_it(
     trigger. It is here so that hardening is a conscious decision to break the demo rather
     than an accident.
     """
-    record = await _seed_record(app_conn, make_mandate, make_signing_key)
+    record = await _seed_record(app_conn, make_mandate, write_record)
     await app_conn.commit()
 
     try:

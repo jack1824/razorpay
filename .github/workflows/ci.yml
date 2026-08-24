@@ -58,6 +58,28 @@ jobs:
           python -m pytest -p no:cacheprovider -m db -q 2>&1 | tee /tmp/db.txt
           grep -q "skipped" /tmp/db.txt && { echo "DB tests skipped in CI — refusing"; exit 1; } || true
 
+      # The latency gate runs in CI from day 3, not day 12. Discovering 300ms on day 11 is
+      # how this project dies: by then the pipeline has eight stages and nobody knows which
+      # one did it.
+      - name: Latency gates
+        run: python -m pytest -q -p no:cacheprovider -s tests/db/test_authorize_latency.py
+
+      # Rule 1, all three enforcements. Named explicitly so a failure here is unmistakable
+      # rather than one line in a 537-test summary.
+      - name: Rule 1 — no LLM in the hot path
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_hot_path_purity.py \
+            tests/test_no_llm_in_hot_path.py
+
+      - name: Rule 3 — zoo is not importable from dwaar
+        run: python -m pytest -q -p no:cacheprovider tests/test_import_isolation.py
+
+      - name: Demo beat 2 — arithmetic deny, model never consulted
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/db/test_authorize_pipeline.py -k beat_2
+
       - name: make verify/eval/demo must exit non-zero until implemented
         run: |
           for t in verify eval demo; do

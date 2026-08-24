@@ -69,6 +69,16 @@ def app_dsn(migrated) -> str:
 
 
 @pytest.fixture
+def migrate_dsn_for_http(migrated) -> str:
+    """The owner DSN, for tests that build a real app.
+
+    Named separately so a test that needs it has to ask, rather than the app silently
+    inheriting `.env` (which carries Docker hostnames that do not resolve from the host).
+    """
+    return MIGRATE_DSN
+
+
+@pytest.fixture
 def superuser_dsn(migrated) -> str:
     if not _reachable(SUPERUSER_DSN):
         pytest.skip("superuser DSN not reachable")
@@ -203,6 +213,73 @@ def make_mandate(make_agent, make_principal):
         )
 
     return _make
+
+
+@pytest.fixture(scope="session")
+def signer(tmp_path_factory):
+    """Dwaar's signing identity for tests, derived from a test seed.
+
+    Private half goes to a tmp dir, never the repo's .keys/, so a test run can never
+    overwrite the seeded demo key.
+    """
+    from dwaar.crypto.signer import derive_signer
+
+    return derive_signer(999, keys_dir=tmp_path_factory.mktemp("keys"))
+
+
+@pytest.fixture
+def write_record(signer):
+    """Write a genuinely signed, chained decision record.
+
+    There is one insert path and it signs — the unsigned `append()` was removed when
+    stage 8 became real. This helper exists so tests stay readable, not so they can skip
+    signing.
+    """
+    from datetime import datetime
+
+    from dwaar.crypto import record as recordmod
+    from dwaar.crypto.signer import ensure_registered
+    from dwaar.db.repositories import decision_records
+
+    async def _write(conn, *, merchant_id, mandate, decision="allow", **overrides):
+        await ensure_registered(conn, signer)
+        await decision_records.lock_chain(conn, merchant_id)
+        position = await decision_records.next_position(conn, merchant_id)
+
+        fields = {
+            "seq": position.seq,
+            "merchant_id": merchant_id,
+            "prev_hash": position.prev_hash,
+            "signing_key_id": signer.key_id,
+            "agent_id": mandate["agent_id"],
+            "principal_id": mandate["principal_id"],
+            "mandate_hash": bytes(mandate["mandate_hash"]),
+            "request_digest": rand_hash(),
+            "decision": decision,
+            "reason_code": "allowed" if decision == "allow" else "denied",
+            "injection_flag": False,
+            "features": {},
+            "degraded_mode": [],
+            "stages_executed": ["render_decision"],
+            "latency_us": 3000,
+            "created_at": datetime.now(UTC),
+        }
+        fields.update(overrides)
+        payload = recordmod.build_payload(**fields)
+        canonical = recordmod.canonical_json(payload)
+        digest = recordmod.payload_hash(payload)
+        return await decision_records.append_signed(
+            conn,
+            merchant_id=merchant_id,
+            position=position,
+            payload=payload,
+            canonical_json=canonical,
+            payload_hash=digest,
+            signature=signer.sign(canonical.encode()),
+            created_at=fields["created_at"],
+        )
+
+    return _write
 
 
 @pytest.fixture

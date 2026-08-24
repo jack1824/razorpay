@@ -272,61 +272,43 @@ async def test_money_must_be_int(owner_conn, make_mandate):
 
 # ── decision records ────────────────────────────────────────────────────────────────
 
-async def _append(conn, merchant_id, key_id, mandate, **kw):
-    defaults = {
-        "merchant_id": merchant_id,
-        "payload_hash": rand_hash(),
-        "signature": rand_sig(),
-        "signing_key_id": key_id,
-        "agent_id": mandate["agent_id"],
-        "principal_id": mandate["principal_id"],
-        "mandate_hash": mandate["mandate_hash"],
-        "request_digest": rand_hash(),
-        "decision": "allow",
-        "features": {"velocity": 1},
-        "policy_version": 1,
-        "latency_us": 3000,
-    }
-    return await decision_records.append(conn, **{**defaults, **kw})
+# There is one insert path and it signs. `write_record` builds the payload, canonicalises
+# it, signs it and appends — the same code stage 8 runs.
 
 
-async def test_chain_starts_at_seq_one_with_zero_prev_hash(
-    owner_conn, make_mandate, make_signing_key
-):
+async def test_chain_starts_at_seq_one_with_zero_prev_hash(owner_conn, make_mandate, write_record):
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
-    first = await _append(owner_conn, merchant, key_id, mandate)
+    first = await write_record(owner_conn, merchant_id=merchant, mandate=mandate)
     assert first["seq"] == 1
     assert bytes(first["prev_hash"]) == decision_records.GENESIS_PREV_HASH
     assert to_hex(first["prev_hash"]) == "0" * 64
 
 
-async def test_chain_links_each_record_to_its_predecessor(
-    owner_conn, make_mandate, make_signing_key
-):
+async def test_chain_links_each_record_to_its_predecessor(owner_conn, make_mandate, write_record):
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
-    records = [await _append(owner_conn, merchant, key_id, mandate) for _ in range(5)]
+    records = [
+        await write_record(owner_conn, merchant_id=merchant, mandate=mandate)
+        for _ in range(5)
+    ]
 
     assert [r["seq"] for r in records] == [1, 2, 3, 4, 5]
     for previous, current in zip(records, records[1:], strict=False):
         assert bytes(current["prev_hash"]) == bytes(previous["payload_hash"])
 
 
-async def test_chains_are_independent_per_merchant(owner_conn, make_mandate, make_signing_key):
+async def test_chains_are_independent_per_merchant(owner_conn, make_mandate, write_record):
     """ADR 0001 Q4: the chain is sharded by merchant, so each starts at seq 1."""
-    key_id = await make_signing_key(owner_conn)
     merchant_a, merchant_b = rand_id("mch"), rand_id("mch")
     mandate_a = await make_mandate(owner_conn, merchant_id=merchant_a)
     mandate_b = await make_mandate(owner_conn, merchant_id=merchant_b)
 
-    a1 = await _append(owner_conn, merchant_a, key_id, mandate_a)
-    b1 = await _append(owner_conn, merchant_b, key_id, mandate_b)
-    a2 = await _append(owner_conn, merchant_a, key_id, mandate_a)
+    a1 = await write_record(owner_conn, merchant_id=merchant_a, mandate=mandate_a)
+    b1 = await write_record(owner_conn, merchant_id=merchant_b, mandate=mandate_b)
+    a2 = await write_record(owner_conn, merchant_id=merchant_a, mandate=mandate_a)
 
     assert a1["seq"] == 1 and b1["seq"] == 1
     assert a2["seq"] == 2
@@ -334,7 +316,7 @@ async def test_chains_are_independent_per_merchant(owner_conn, make_mandate, mak
 
 
 async def test_risk_score_is_null_when_the_model_was_not_consulted(
-    owner_conn, make_mandate, make_signing_key
+    owner_conn, make_mandate, write_record
 ):
     """The NULL is the audit-trail proof the limit was enforced by arithmetic.
 
@@ -342,13 +324,11 @@ async def test_risk_score_is_null_when_the_model_was_not_consulted(
     """
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
-    record = await _append(
+    record = await write_record(
         owner_conn,
-        merchant,
-        key_id,
-        mandate,
+        merchant_id=merchant,
+        mandate=mandate,
         decision="deny",
         rule_fired="mandate.max_per_txn",
         risk_score=None,
@@ -358,50 +338,55 @@ async def test_risk_score_is_null_when_the_model_was_not_consulted(
     assert record["rule_fired"] == "mandate.max_per_txn"
 
 
-async def test_risk_score_is_bounded(owner_conn, make_mandate, make_signing_key):
+async def test_risk_score_is_bounded(owner_conn, make_mandate, write_record):
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
-    ok = await _append(owner_conn, merchant, key_id, mandate, risk_score=1.0)
+    ok = await write_record(
+        owner_conn, merchant_id=merchant, mandate=mandate,
+        risk_score=1.0, model_version="lgbm-test",
+    )
     assert float(ok["risk_score"]) == 1.0
 
     with pytest.raises(CheckViolation):
-        await _append(owner_conn, merchant, key_id, mandate, risk_score=1.5)
+        await write_record(
+            owner_conn, merchant_id=merchant, mandate=mandate,
+            risk_score=1.5, model_version="lgbm-test",
+        )
 
 
-async def test_invalid_decision_is_rejected(owner_conn, make_mandate, make_signing_key):
+async def test_invalid_decision_is_rejected(owner_conn, make_mandate, write_record):
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
-    with pytest.raises(ValueError, match="invalid decision"):
-        await _append(owner_conn, merchant, key_id, mandate, decision="maybe")
+    with pytest.raises(psycopg.errors.CheckViolation):
+        await write_record(owner_conn, merchant_id=merchant, mandate=mandate, decision="maybe")
 
 
-async def test_signing_key_is_required_and_must_exist(owner_conn, make_mandate):
+async def test_signing_key_is_required_and_must_exist(owner_conn, make_mandate, write_record):
     """Q5: a record must name the key that signed it, and that key must be on file."""
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
 
     with pytest.raises(ForeignKeyViolation):
-        await _append(owner_conn, merchant, "key_nonexistent", mandate)
+        await write_record(
+            owner_conn, merchant_id=merchant, mandate=mandate,
+            signing_key_id="key_nonexistent",
+        )
 
 
-async def test_hash_lengths_are_enforced(owner_conn, make_mandate, make_signing_key):
+async def test_hash_lengths_are_enforced(owner_conn, make_mandate, write_record):
     merchant = rand_id("mch")
     mandate = await make_mandate(owner_conn, merchant_id=merchant)
-    key_id = await make_signing_key(owner_conn)
 
     with pytest.raises(ValueError, match="expected 32 bytes"):
-        await _append(owner_conn, merchant, key_id, mandate, payload_hash=b"\x01" * 16)
-
-    with pytest.raises(ValueError, match="expected 64 bytes"):
-        await _append(owner_conn, merchant, key_id, mandate, signature=b"\x01" * 32)
+        await write_record(
+            owner_conn, merchant_id=merchant, mandate=mandate, request_digest=b"\x01" * 16
+        )
 
 
 async def test_concurrent_chain_appends_do_not_break_the_chain(
-    app_dsn, owner_dsn, make_mandate, make_signing_key
+    app_dsn, owner_dsn, make_mandate, write_record
 ):
     """The failure BIGSERIAL would have caused, asserted directly.
 
@@ -411,14 +396,13 @@ async def test_concurrent_chain_appends_do_not_break_the_chain(
     merchant = rand_id("mch")
     setup = await psycopg.AsyncConnection.connect(owner_dsn)
     mandate = await make_mandate(setup, merchant_id=merchant)
-    key_id = await make_signing_key(setup)
     await setup.commit()
     await setup.close()
 
     async def append_one() -> str:
         async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
             try:
-                await _append(conn, merchant, key_id, mandate)
+                await write_record(conn, merchant_id=merchant, mandate=mandate)
                 await conn.commit()
                 return "ok"
             except Exception as exc:  # noqa: BLE001

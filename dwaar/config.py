@@ -10,6 +10,7 @@ separate settings rather than one string with a comment.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,12 @@ class Settings(BaseSettings):
 
     # Threat 12: request size cap. Enforced in middleware from day 1, not day 13.
     max_body_bytes: int = Field(default=64 * 1024, alias="MAX_BODY_BYTES")
+
+    # Dwaar's signing identity is derived from this, by the same HKDF mechanism as every
+    # other keypair in the demo — so the entire system is reproducible from one integer.
+    # A production signer belongs in a KMS; see dwaar/crypto/signer.py.
+    signing_seed: int = Field(default=20260905, alias="DWAAR_SIGNING_SEED")
+    keys_dir: Path = Field(default=Path(".keys"), alias="DWAAR_KEYS_DIR")
 
 
 @lru_cache(maxsize=1)

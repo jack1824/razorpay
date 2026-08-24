@@ -128,6 +128,26 @@ def trace_id_processor(_logger: Any, _name: str, event_dict: dict) -> dict:
     return event_dict
 
 
+class _StdoutLogger:
+    """Writes to ``sys.stdout`` as it is AT WRITE TIME, not as it was at construction.
+
+    structlog's ``PrintLoggerFactory`` binds the stream when the logger is built. Anything
+    that later replaces ``sys.stdout`` — pytest's capture, a daemonising supervisor, log
+    rotation — leaves the logger holding a closed handle, and the next log line raises
+    ``ValueError: I/O operation on closed file`` from inside the logging call.
+
+    That surfaced here as a test failure in an unrelated benchmark, which is the mild
+    version. The severe version is a process that stops logging at the moment something
+    goes wrong with its output stream.
+    """
+
+    def msg(self, message: str) -> None:
+        print(message, file=sys.stdout, flush=True)
+
+    log = debug = info = warn = warning = msg
+    error = critical = exception = fatal = msg
+
+
 def configure_logging(level: str = "INFO") -> None:
     """Idempotent. Safe to call from app startup and from a test fixture."""
     logging.basicConfig(
@@ -150,7 +170,7 @@ def configure_logging(level: str = "INFO") -> None:
         wrapper_class=structlog.make_filtering_bound_logger(
             getattr(logging, level.upper(), logging.INFO)
         ),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=lambda *_: _StdoutLogger(),
         cache_logger_on_first_use=False,
     )
 

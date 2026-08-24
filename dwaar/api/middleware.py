@@ -1,19 +1,34 @@
 """Request middleware: trace ID, access log, body size cap.
 
-The body cap is here rather than in a route validator because it must apply before any
-parsing — threat 12 is a resource exhaustion threat, and a 64KB limit enforced after
-`await request.json()` has already read the body is not a limit.
+The body cap is **pure ASGI**, not `BaseHTTPMiddleware`, and that is not a style preference.
+
+`BaseHTTPMiddleware` hands the downstream app a *different* `Request` object built from the
+scope. Consuming `request.stream()` in the middleware and re-attaching the buffer via
+`request._receive` therefore mutates an object the route never sees: the stream is drained,
+nothing replaces it, and every POST body arrives empty. The route then returns
+`422 {"loc": ["body"], "msg": "Field required"}` for a request that had a perfectly good
+body.
+
+Phase 1 shipped that version. Nothing caught it because `/health` is the only endpoint and
+it is a GET — the tests POSTed to it purely to trigger the size cap and got a 405 either
+way. It surfaced the moment `/v1/authorize` existed. See FAILURES.md F-015.
+
+Pure ASGI lets the buffered body be replayed through a `receive` callable the downstream
+app actually uses.
 """
 
 from __future__ import annotations
 
+import json
 import time
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from dwaar.logging import get_logger, set_trace_id
+from dwaar.metrics import rejected_total
 
 log = get_logger("dwaar.api")
 
@@ -24,8 +39,8 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
     """Bind a trace ID for the request and echo it back on the response.
 
     An inbound ``X-Dwaar-Trace-Id`` is honoured so a caller can correlate across the MCP
-    proxy, but it is length-capped: it lands in log lines, and an unbounded caller-supplied
-    string in a log line is a log-injection surface.
+    proxy, but it is length- and charset-capped: it lands in log lines, and an unbounded
+    caller-supplied string in a log line is a log-injection surface.
     """
 
     async def dispatch(self, request: Request, call_next):
@@ -60,39 +75,73 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
         return response
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
+class BodySizeLimitMiddleware:
     """Reject oversized bodies before anything parses them (threat 12).
 
-    Checks the declared Content-Length first, then enforces the real limit while streaming,
-    because Content-Length is attacker-controlled and chunked requests do not send one.
+    Two checks, because either alone is insufficient:
+
+    - the declared ``Content-Length``, which is cheap but attacker-controlled;
+    - the bytes actually received, which is authoritative and is what a chunked request
+      or a lying header requires.
     """
 
-    def __init__(self, app, max_bytes: int) -> None:
-        super().__init__(app)
+    def __init__(self, app: ASGIApp, max_bytes: int) -> None:
+        self.app = app
         self.max_bytes = max_bytes
 
-    async def dispatch(self, request: Request, call_next):
-        declared = request.headers.get("content-length")
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers") or ())
+        declared = headers.get(b"content-length")
         if declared is not None:
             try:
                 if int(declared) > self.max_bytes:
-                    return self._too_large()
+                    await self._reject(send)
+                    return
             except ValueError:
-                return self._too_large()
+                await self._reject(send)
+                return
 
+        # Buffer, enforcing the real limit as we go. Buffering is the point of a size cap:
+        # we are bounding memory, so reading it all is the bound being applied.
         body = b""
-        async for chunk in request.stream():
-            body += chunk
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body += message.get("body", b"")
             if len(body) > self.max_bytes:
-                return self._too_large()
+                await self._reject(send)
+                return
+            more_body = message.get("more_body", False)
 
-        # The stream is consumed; hand the buffered body to the downstream app.
-        async def receive():
-            return {"type": "http.request", "body": body, "more_body": False}
+        replayed = False
 
-        request._receive = receive  # noqa: SLF001 — the supported Starlette pattern
-        return await call_next(request)
+        async def replay() -> Message:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
 
-    def _too_large(self) -> JSONResponse:
-        log.warning("body_too_large")
-        return JSONResponse({"reason_code": "request_too_large"}, status_code=413)
+        await self.app(scope, replay, send)
+
+    async def _reject(self, send: Send) -> None:
+        log.warning("body_too_large", reason_code="request_too_large")
+        rejected_total.labels(reason="request_too_large").inc()
+        payload = json.dumps({"reason_code": "request_too_large"}).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(payload)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})

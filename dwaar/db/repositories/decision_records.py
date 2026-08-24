@@ -35,26 +35,29 @@ from psycopg import AsyncConnection
 
 from dwaar.db.repositories.base import (
     HASH_BYTES,
-    SIG_BYTES,
     fetch_all,
     fetch_one,
     from_hex,
-    to_hex,
 )
 from dwaar.errors import ChainError
-from dwaar.money import Paise
 
 GENESIS_PREV_HASH: bytes = b"\x00" * HASH_BYTES
 """Genesis link. 32 zero bytes; 64 zeros in hex at any JSON boundary."""
 
 _COLUMNS = (
     "record_id, merchant_id, seq, prev_hash, payload_hash, signature, signing_key_id, "
-    "agent_id, principal_id, mandate_hash, request_digest, decision, rule_fired, "
-    "risk_score, injection_flag, amount_paise, budget_before, budget_after, features, "
-    "policy_version, latency_us, degraded_mode, created_at"
+    "agent_id, principal_id, mandate_hash, request_digest, decision, reason_code, "
+    "rule_fired, risk_score, model_version, injection_flag, amount_paise, budget_before, "
+    "budget_after, features, policy_version, latency_us, degraded_mode, stages_executed, "
+    "canonical_json, created_at"
 )
 
 VALID_DECISIONS = frozenset({"allow", "bound", "throttle", "step_up", "deny"})
+
+# There is deliberately ONE insert path — `append_signed` — and it requires a signature.
+# An unsigned `append()` existed during Phase 2 and was removed when stage 8 became real:
+# a second way to write a record, which happens not to sign, is precisely the lie-shaped
+# artifact the stub rule exists to prevent. Someone would eventually have used it.
 
 
 @dataclass(frozen=True)
@@ -88,94 +91,6 @@ async def next_position(conn: AsyncConnection, merchant_id: str) -> ChainPositio
     if row is None:
         return ChainPosition(seq=1, prev_hash=GENESIS_PREV_HASH)
     return ChainPosition(seq=row["seq"] + 1, prev_hash=bytes(row["payload_hash"]))
-
-
-async def append(
-    conn: AsyncConnection,
-    *,
-    merchant_id: str,
-    payload_hash: str | bytes,
-    signature: str | bytes,
-    signing_key_id: str,
-    agent_id: str,
-    principal_id: str,
-    mandate_hash: str | bytes,
-    request_digest: str | bytes,
-    decision: str,
-    features: dict[str, Any],
-    policy_version: int,
-    latency_us: int,
-    rule_fired: str | None = None,
-    risk_score: float | None = None,
-    injection_flag: bool = False,
-    amount_paise: Paise | None = None,
-    budget_before: Paise | None = None,
-    budget_after: Paise | None = None,
-    degraded_mode: str | None = None,
-    expect_position: ChainPosition | None = None,
-) -> dict[str, Any]:
-    """Append one record to the merchant's chain.
-
-    Takes the chain lock itself, so the caller does not have to remember to. Everything
-    runs in the caller's transaction; on rollback the lock releases and no ``seq`` is
-    burned — which is the whole reason ``seq`` is not a sequence.
-
-    ``expect_position`` lets a caller that computed ``payload_hash`` over a specific
-    ``(seq, prev_hash)`` assert it still holds. It always will, because the lock is held —
-    but the signature covers those fields, so a mismatch would produce a record that
-    verifies against nothing, and failing loudly beats writing it.
-    """
-    if decision not in VALID_DECISIONS:
-        raise ValueError(
-            f"invalid decision {decision!r}; expected one of {sorted(VALID_DECISIONS)}"
-        )
-
-    await lock_chain(conn, merchant_id)
-    position = await next_position(conn, merchant_id)
-
-    if expect_position is not None and (
-        expect_position.seq != position.seq
-        or expect_position.prev_hash != position.prev_hash
-    ):
-        raise ChainError(
-            f"chain position moved under the lock for merchant {merchant_id}: "
-            f"expected seq={expect_position.seq} prev={to_hex(expect_position.prev_hash)}, "
-            f"found seq={position.seq} prev={to_hex(position.prev_hash)}"
-        )
-
-    return await fetch_one(
-        conn,
-        f"INSERT INTO decision_records ("
-        f"  merchant_id, seq, prev_hash, payload_hash, signature, signing_key_id, "
-        f"  agent_id, principal_id, mandate_hash, request_digest, decision, rule_fired, "
-        f"  risk_score, injection_flag, amount_paise, budget_before, budget_after, "
-        f"  features, policy_version, latency_us, degraded_mode"
-        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-        f"RETURNING {_COLUMNS}",
-        (
-            merchant_id,
-            position.seq,
-            position.prev_hash,
-            from_hex(payload_hash, expect_len=HASH_BYTES),
-            from_hex(signature, expect_len=SIG_BYTES),
-            signing_key_id,
-            agent_id,
-            principal_id,
-            from_hex(mandate_hash, expect_len=HASH_BYTES),
-            from_hex(request_digest, expect_len=HASH_BYTES),
-            decision,
-            rule_fired,
-            risk_score,
-            injection_flag,
-            amount_paise,
-            budget_before,
-            budget_after,
-            json.dumps(features, sort_keys=True, separators=(",", ":")),
-            policy_version,
-            latency_us,
-            degraded_mode,
-        ),
-    )
 
 
 async def get(conn: AsyncConnection, record_id: str) -> dict[str, Any] | None:
@@ -233,3 +148,164 @@ async def check_contiguity(conn: AsyncConnection, merchant_id: str) -> list[int]
         (merchant_id, merchant_id, merchant_id),
     )
     return [r["missing"] for r in rows]
+
+
+async def append_signed(
+    conn: AsyncConnection,
+    *,
+    merchant_id: str,
+    position: ChainPosition,
+    payload: dict[str, Any],
+    canonical_json: str,
+    payload_hash: bytes,
+    signature: bytes,
+    created_at: Any,
+) -> dict[str, Any]:
+    """Insert a record whose payload was already canonicalised and signed.
+
+    Separate from ``append`` because the signed form has a different contract: the caller
+    has already taken the chain lock, read the position, and computed a hash over that
+    exact ``(seq, prev_hash)``. Re-deriving anything here would risk signing one position
+    and inserting at another, producing a record that verifies against nothing.
+
+    Every column value is read back out of ``payload`` rather than taken as a separate
+    argument — including ``signing_key_id``, which was briefly a parameter until a test
+    proved the two could disagree. A column that differs from the bytes signed over it
+    produces a record that verifies against nothing, which is indistinguishable from a
+    forgery.
+    """
+    if payload["seq"] != position.seq:
+        raise ChainError(
+            f"signed payload is for seq {payload['seq']} but the chain position is "
+            f"{position.seq}; inserting would store a signature over the wrong position"
+        )
+
+    return await fetch_one(
+        conn,
+        f"INSERT INTO decision_records ("
+        f"  merchant_id, seq, prev_hash, payload_hash, signature, signing_key_id, "
+        f"  agent_id, principal_id, mandate_hash, request_digest, decision, reason_code, "
+        f"  rule_fired, risk_score, model_version, injection_flag, amount_paise, "
+        f"  budget_before, budget_after, features, policy_version, latency_us, "
+        f"  degraded_mode, stages_executed, canonical_json, created_at"
+        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        f"RETURNING {_COLUMNS}",
+        (
+            merchant_id,
+            payload["seq"],
+            position.prev_hash,
+            payload_hash,
+            signature,
+            payload["signing_key_id"],
+            payload["agent_id"],
+            payload["principal_id"],
+            from_hex(payload["mandate_hash"], expect_len=HASH_BYTES),
+            from_hex(payload["request_digest"], expect_len=HASH_BYTES),
+            payload["decision"],
+            payload["reason_code"],
+            payload["rule_fired"],
+            payload["risk_score"],
+            payload["model_version"],
+            payload["injection_flag"],
+            payload["amount_paise"],
+            payload["budget_before"],
+            payload["budget_after"],
+            json.dumps(payload["features"], sort_keys=True, separators=(",", ":")),
+            payload["policy_version"],
+            payload["latency_us"],
+            payload["degraded_mode"],
+            payload["stages_executed"],
+            canonical_json,
+            created_at,
+        ),
+    )
+
+
+async def verify_chain(
+    conn: AsyncConnection, merchant_id: str, *, from_seq: int = 1, limit: int = 10_000
+) -> dict[str, Any]:
+    """Walk a merchant's chain and verify links and signatures.
+
+    A *walk*, not `seq - 1` arithmetic: each record's ``prev_hash`` is compared against its
+    immediate predecessor in seq order. Gaps are reported separately rather than treated as
+    breaks, because `FAIL_MATRIX.md` records that a Postgres outage produces denials that
+    cannot be chained, and an outage must not read as a tamper.
+
+    Returns ``{ok, records, broken_at_seq, reason, gaps}``.
+    """
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    from dwaar.crypto import record as recordmod
+
+    rows = await iter_chain(conn, merchant_id, from_seq=from_seq, limit=limit)
+    if not rows:
+        return {"ok": True, "records": 0, "broken_at_seq": None, "reason": None, "gaps": []}
+
+    keys = {
+        r["key_id"]: bytes(r["public_key"])
+        for r in await fetch_all(conn, "SELECT key_id, public_key FROM signing_keys")
+    }
+
+    expected_prev = GENESIS_PREV_HASH if from_seq == 1 else None
+    for row in rows:
+        # 0. THE COLUMNS MUST AGREE WITH THE BYTES THAT WERE SIGNED.
+        #
+        #    Without this, an attacker edits `amount_paise` and leaves canonical_json
+        #    alone: every hash still matches, the signature still verifies, and the row
+        #    everyone actually reads now says something the principal never authorised.
+        #    Demo beat 6 is exactly that UPDATE.
+        try:
+            rebuilt = recordmod.canonical_json(recordmod.payload_from_row(row))
+        except Exception as exc:  # noqa: BLE001
+            return _broken(row, f"columns cannot be canonicalised: {exc}", rows)
+        if rebuilt != row["canonical_json"]:
+            return _broken(row, "columns do not match the signed canonical_json", rows)
+
+        # 1. The stored canonical form must actually hash to the stored payload_hash.
+        recomputed = __import__("hashlib").sha256(row["canonical_json"].encode()).digest()
+        if recomputed != bytes(row["payload_hash"]):
+            return _broken(row, "payload_hash does not match canonical_json", rows)
+
+        # 2. The canonical form must be the canonical form — a re-canonicalisation that
+        #    differs means the stored bytes were hand-edited into something JCS would
+        #    never have produced.
+        import json as _json
+
+        if recordmod.canonical_json(_json.loads(row["canonical_json"])) != row["canonical_json"]:
+            return _broken(row, "canonical_json is not in canonical form", rows)
+
+        # 3. The chain link.
+        if expected_prev is not None and bytes(row["prev_hash"]) != expected_prev:
+            return _broken(row, "prev_hash does not match the preceding payload_hash", rows)
+
+        # 4. The signature, resolved through the key the record names.
+        public = keys.get(row["signing_key_id"])
+        if public is None:
+            return _broken(row, f"unknown signing_key_id {row['signing_key_id']}", rows)
+        try:
+            Ed25519PublicKey.from_public_bytes(public).verify(
+                bytes(row["signature"]), row["canonical_json"].encode("utf-8")
+            )
+        except InvalidSignature:
+            return _broken(row, "signature does not verify", rows)
+
+        expected_prev = bytes(row["payload_hash"])
+
+    return {
+        "ok": True,
+        "records": len(rows),
+        "broken_at_seq": None,
+        "reason": None,
+        "gaps": await check_contiguity(conn, merchant_id),
+    }
+
+
+def _broken(row: dict[str, Any], reason: str, rows: list) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "records": len(rows),
+        "broken_at_seq": row["seq"],
+        "reason": reason,
+        "gaps": [],
+    }

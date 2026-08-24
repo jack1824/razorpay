@@ -13,6 +13,8 @@ So: 200 whenever the process can serve, with per-dependency status in the body.
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from dwaar import __version__
 
@@ -38,3 +40,17 @@ async def health(request: Request) -> dict:
         "trace_id": getattr(request.state, "trace_id", None),
         "dependencies": {"postgres": db_status},
     }
+
+
+@router.get("/metrics", include_in_schema=True)
+async def metrics() -> Response:
+    """Prometheus exposition.
+
+    Unauthenticated and excluded from the RFC 9421 signature requirement: it is an
+    operational surface, it exposes no agent-identifiable data, and requiring a signed
+    request to scrape metrics would mean the scraper needs an agent identity.
+    """
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )

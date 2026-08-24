@@ -14,7 +14,19 @@ from dwaar.config import Settings
 
 @pytest.fixture
 def client():
-    app = create_app(Settings(MAX_BODY_BYTES=1024))
+    # Explicit DSNs, not whatever `.env` holds. `.env` carries Docker service hostnames
+    # (`postgres:5432`) which do not resolve from the host, so inheriting it made every
+    # setup wait out the startup connection timeout.
+    from tests.conftest import APP_DSN, MIGRATE_DSN, SUPERUSER_DSN
+
+    app = create_app(
+        Settings(
+            MAX_BODY_BYTES=1024,
+            DATABASE_URL_APP=APP_DSN,
+            DATABASE_URL_MIGRATE=MIGRATE_DSN,
+            DATABASE_URL_SUPERUSER=SUPERUSER_DSN,
+        )
+    )
     with TestClient(app) as c:
         yield c
 
@@ -95,3 +107,30 @@ def test_openapi_declares_no_llm(client):
     assert r.status_code == 200
     description = json.dumps(r.json()["info"]).lower()
     assert "llm" in description
+
+
+# ── F-015 regression ────────────────────────────────────────────────────────────────
+
+def test_a_post_body_survives_the_size_cap_middleware(client):
+    """The body cap must not eat the body it is measuring.
+
+    Phase 1's version consumed `request.stream()` and re-attached the buffer to the
+    middleware's own Request object — which `BaseHTTPMiddleware` does not hand downstream.
+    Every POST body arrived empty and every route returned 422. Nothing caught it because
+    /health is a GET and the only POSTs in the suite existed to trigger the 413.
+
+    /openapi.json is a GET, so this exercises the middleware against a route that actually
+    parses a body: an under-limit POST must reach the route and fail on *validation*, not
+    on a missing body.
+    """
+    r = client.post("/v1/authorize", json={"agent_id": "wrong-format"})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    locations = {tuple(item["loc"]) for item in detail}
+    assert ("body",) not in locations, (
+        "the route reported the whole body as missing, which means the size-cap "
+        "middleware consumed the stream without replaying it (F-015)"
+    )
+    assert any(item["loc"][:2] == ["body", "agent_id"] for item in detail), (
+        f"expected field-level validation errors, got {detail}"
+    )

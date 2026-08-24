@@ -18,8 +18,9 @@ from psycopg_pool import AsyncConnectionPool
 
 from dwaar import __version__
 from dwaar.api.middleware import BodySizeLimitMiddleware, TraceIDMiddleware
-from dwaar.api.routes import health
+from dwaar.api.routes import authorize, health
 from dwaar.config import Settings, get_settings
+from dwaar.crypto.signer import derive_signer, ensure_registered
 from dwaar.logging import configure_logging, get_logger
 
 log = get_logger("dwaar.api")
@@ -43,6 +44,21 @@ async def lifespan(app: FastAPI):
         await pool.open(wait=False)
     except Exception as exc:  # noqa: BLE001
         log.warning("pool_open_deferred", error_type=type(exc).__name__)
+
+    # Dwaar's own signing identity. Derived from the seed, so the whole system is
+    # reproducible from one integer; the public half is registered so the verifier can
+    # resolve any record's key by the id the record names.
+    signer = derive_signer(settings.signing_seed, keys_dir=settings.keys_dir)
+    app.state.signer = signer
+    try:
+        async with pool.connection(timeout=2.0) as conn:
+            await ensure_registered(conn, signer)
+            await conn.commit()
+        log.info("signing_key_registered", signing_key_id=signer.key_id)
+    except Exception as exc:  # noqa: BLE001
+        # Fail-closed is enforced per request by stage 8, which cannot write without a
+        # registered key. Startup stays up so /health can report the condition.
+        log.error("signing_key_registration_failed", error_type=type(exc).__name__)
 
     log.info("startup", version=__version__, component="api")
     try:
@@ -74,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(TraceIDMiddleware)
 
     app.include_router(health.router, tags=["ops"])
+    app.include_router(authorize.router, tags=["authorize"])
     return app
 
 

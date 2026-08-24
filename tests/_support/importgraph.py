@@ -93,6 +93,20 @@ def build_graph(package: str, repo_root: Path = REPO_ROOT) -> ImportGraph:
                 )
                 if target:
                     edges.append(ImportEdge(module, target, path, node.lineno))
+                    # `from X import Y` may be importing the SUBMODULE X.Y, not a name
+                    # defined in X. Recording only the edge to X made every such import
+                    # invisible to traversal: `from dwaar.crypto import keys` produced an
+                    # edge to `dwaar.crypto`, whose __init__ imports nothing, so the walk
+                    # stopped there and `dwaar.crypto.keys` was never visited.
+                    #
+                    # Statically we cannot tell a submodule from a name, so both edges are
+                    # recorded. A name that is not a module simply never resolves to
+                    # anything in graph.modules and costs one dictionary miss.
+                    for alias in node.names:
+                        if alias.name != "*":
+                            edges.append(
+                                ImportEdge(module, f"{target}.{alias.name}", path, node.lineno)
+                            )
         graph.edges[module] = edges
     return graph
 
@@ -138,3 +152,21 @@ def transitive_imports(graph: ImportGraph, start: str) -> set[str]:
             if edge.target_module in graph.modules:
                 stack.append(edge.target_module)
     return out
+
+
+def build_synthetic_package(root, name: str, modules: dict[str, str]) -> ImportGraph:
+    """Materialise a throwaway package on disk and graph it.
+
+    Used as a POSITIVE CONTROL. A walker that silently finds nothing makes every
+    "assert no forbidden import" vacuously true — the characteristic failure of a test
+    whose job is to never fail. Asserting against the real codebase cannot detect that,
+    because the real codebase is supposed to be clean. A package built to be dirty can.
+
+        modules: {"a": "import b", "b": "import forbidden_thing"}
+    """
+    package_dir = root / name
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    for module_name, source in modules.items():
+        (package_dir / f"{module_name}.py").write_text(source, encoding="utf-8")
+    return build_graph(name, root)
