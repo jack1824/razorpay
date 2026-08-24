@@ -179,3 +179,134 @@ async def test_superuser_can_tamper_because_the_demo_requires_it(
                     "DELETE FROM decision_records WHERE record_id = %s", (record["record_id"],)
                 )
             await su.commit()
+
+
+# ── Authority columns are not writable by the app (migration 0010) ──────────────────
+#
+# The two-role grant protects decision_records. Table-wide UPDATE on `mandates` left the
+# same class of hole one table over: the app could extend its own expiry or raise its own
+# per-transaction cap, and nothing would detect it — the principal's signature covers
+# canonical_json, which stays untouched, while the hot path reads the denormalised columns.
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("expires_at", "now() + interval '100 years'"),
+        ("max_total_paise", "999999999"),
+        ("max_per_txn_paise", "999999999"),
+        ("allow_categories", "ARRAY['gift_cards']"),
+        ("deny_categories", "ARRAY[]::text[]"),
+        ("canonical_json", "'{}'"),
+        ("signature", "decode(repeat('00', 64), 'hex')"),
+        ("mandate_hash", "decode(repeat('00', 32), 'hex')"),
+        ("principal_id", "'prn_someone_else'"),
+    ],
+)
+async def test_app_cannot_rewrite_mandate_authority(app_conn, make_mandate, column, value):
+    mandate = await make_mandate(app_conn)
+    async with app_conn.transaction(force_rollback=True):
+        with pytest.raises(InsufficientPrivilege):
+            async with app_conn.cursor() as cur:
+                await cur.execute(
+                    f"UPDATE mandates SET {column} = {value} WHERE mandate_id = %s",
+                    (mandate["mandate_id"],),
+                )
+
+
+async def test_app_can_still_revoke(app_conn, make_mandate):
+    """The one mandate UPDATE the app legitimately needs must keep working."""
+    from dwaar.db.repositories import mandates
+
+    mandate = await make_mandate(app_conn)
+    assert await mandates.revoke(app_conn, mandate["mandate_id"]) is True
+    assert (await mandates.get(app_conn, mandate["mandate_id"]))["revoked_at"] is not None
+
+
+async def test_app_cannot_move_an_agent_to_another_merchant(app_conn, make_agent):
+    agent = await make_agent(app_conn)
+    async with app_conn.transaction(force_rollback=True):
+        with pytest.raises(InsufficientPrivilege):
+            async with app_conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE agents SET registered_by = 'mch_attacker' WHERE agent_id = %s",
+                    (agent["agent_id"],),
+                )
+
+
+async def test_app_can_still_suspend_and_rotate(app_conn, make_agent):
+    from dwaar.db.repositories import agents as agentrepo
+
+    agent = await make_agent(app_conn)
+    assert await agentrepo.set_status(app_conn, agent["agent_id"], "suspended") is True
+    rotated = await agentrepo.rotate_key(app_conn, agent["agent_id"], b"\x02" * 32)
+    assert bytes(rotated["public_key"]) == b"\x02" * 32
+
+
+async def test_app_cannot_rewrite_an_approved_policys_rules(app_conn, migrated):
+    """An approved policy's rules are frozen. A change is a new version, which is an INSERT."""
+    from dwaar.db.repositories import policies
+    from tests.conftest import rand_id
+
+    policy_id = rand_id("pol")
+    await policies.create(
+        app_conn,
+        policy_id=policy_id,
+        merchant_id=rand_id("mch"),
+        version=1,
+        source_nl="Deny gift cards.",
+        compiled_rules={"deny": ["gift_cards"]},
+        generated_tests={"cases": []},
+        tests_passed=True,
+    )
+    async with app_conn.transaction(force_rollback=True):
+        with pytest.raises(InsufficientPrivilege):
+            async with app_conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE policies SET compiled_rules = '{}'::jsonb WHERE policy_id = %s",
+                    (policy_id,),
+                )
+
+
+async def test_app_cannot_rewrite_a_signing_keys_public_half(app_conn, make_signing_key):
+    """Rewriting a key that has already signed records invalidates every one of them,
+    and invalidation is indistinguishable from forgery."""
+    key_id = await make_signing_key(app_conn)
+    async with app_conn.transaction(force_rollback=True):
+        with pytest.raises(InsufficientPrivilege):
+            async with app_conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE signing_keys SET public_key = %s WHERE key_id = %s",
+                    (b"\x00" * 32, key_id),
+                )
+
+
+async def test_mandate_hash_is_unique(app_conn, make_mandate):
+    """The verifier resolves a record to its authority by this hash; a collision would
+    make that join ambiguous with no way to choose."""
+    from psycopg.errors import UniqueViolation
+
+    first = await make_mandate(app_conn)
+    async with app_conn.transaction(force_rollback=True):
+        with pytest.raises(UniqueViolation):
+            async with app_conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE mandates SET revoked_at = NULL WHERE mandate_id = %s",
+                    (first["mandate_id"],),
+                )
+                await cur.execute(
+                    "INSERT INTO mandates (mandate_id, principal_id, agent_id, "
+                    " max_total_paise, max_per_txn_paise, expires_at, nonce, "
+                    " canonical_json, signature, mandate_hash) "
+                    "VALUES (%s,%s,%s,%s,%s,now()+interval '1 day',%s,'{}',%s,%s)",
+                    (
+                        "mnd_collision01",
+                        first["principal_id"],
+                        first["agent_id"],
+                        100000,
+                        10000,
+                        "collision-nonce",
+                        bytes(first["signature"]),
+                        bytes(first["mandate_hash"]),  # same hash
+                    ),
+                )

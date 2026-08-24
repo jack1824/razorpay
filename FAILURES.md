@@ -415,3 +415,57 @@ enforcement point because no stage reads it. Both recorded, both land day 4.
 Also corrected: the fail matrix said "Confidence low (0.55–0.80)". That band is the risk
 *score*. Calibrated confidence is a separate quantity, and conflating the two makes the
 escalation rule unimplementable.
+
+---
+
+### F-013 — The app role could extend its own authority — FIXED
+
+**Found:** the package audit, in code already committed and pushed.
+
+Migration 0009 granted table-wide `UPDATE` on `mandates`, `agents`, `policies` and
+`signing_keys`, because the app legitimately mutates one or two columns on each —
+`revoked_at`, `status`, `approved_by`, `retired_at`. Table-wide `UPDATE` also granted every
+*other* column on those tables, and on `mandates` the other columns **are the authority**.
+
+Demonstrated against the running database before the fix:
+
+```
+$ psql "postgresql://dwaar_app:...@localhost/dwaar"
+UPDATE mandates SET expires_at = now() + interval '100 years' WHERE ...;
+UPDATE 1
+```
+
+The application could extend its own mandate indefinitely, or raise `max_per_txn_paise`,
+and **nothing would detect it.** The principal's signature covers `canonical_json`, which
+is untouched, so the mandate still verifies. The hot path reads the denormalised columns,
+not the signed blob. The signature stays valid while the authority it attests to has been
+rewritten underneath it.
+
+**What we got wrong:** we reasoned about `decision_records` as *the* table that needed a
+narrow grant, because that is the one the pitch is about, and granted the others by asking
+"does the app write here?" rather than "which column, and what else does that permit?".
+Same class of defect as the no-op `REVOKE` we caught in the package — a grant that reads as
+a control and is not one — one table over, in our own work, twelve hours later.
+
+It is also worse than the original defect in one respect. Tampering with `decision_records`
+is caught by the hash chain. Tampering with `mandates` is caught by nothing: no chain, no
+signature over the mutable columns, and the one signature that exists keeps verifying.
+
+**Fix:** migration `0010`, column-level grants. PostgreSQL supports them, so the grant now
+states the intent exactly — revocation is an UPDATE the app must make; the caps and the
+expiry are not. Nine columns of `mandates`, plus `registered_by` on `agents` (an agent must
+not move itself to another merchant), `compiled_rules` on `policies` (an approved policy's
+rules are frozen; a change is a new version, which is an INSERT), and `public_key` on
+`signing_keys` (rewriting a key that has already signed records invalidates every one of
+them, and invalidation is indistinguishable from forgery). Each is asserted by a test, and
+so is the fact that revocation, suspension and key rotation still work.
+
+`mandates.mandate_hash` also became UNIQUE. It is how the verifier resolves a record back
+to the authority that was exercised; a plain index made that join fast, UNIQUE makes it
+unambiguous.
+
+**Still open, and the audit is right that it matters:** the hot path reads the denormalised
+columns rather than re-deriving from `canonical_json`. Column grants close the path through
+the app role, but a superuser can still rewrite `max_per_txn_paise` and leave a valid
+signature over stale terms. The honest fix is a verifier invariant asserting the columns
+agree with the signed blob. Day 4, with the rest of the verifier.
