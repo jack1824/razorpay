@@ -9,6 +9,8 @@ import pytest
 
 from dwaar.db.migrate import MIGRATIONS_DIR, discover, migrate
 from dwaar.errors import MigrationError
+from tests._support import sourcescan
+from tests._support.importgraph import REPO_ROOT
 
 pytestmark = pytest.mark.db
 
@@ -138,22 +140,25 @@ async def test_decision_records_has_no_pgcrypto_dependency(owner_conn):
         assert (await cur.fetchone())[0] is not None
 
 
-def _strip_sql_comments(sql: str) -> str:
-    """Drop `--` comments before grepping.
-
-    Without this the check matches its own documentation: 0001 explains *why* pgcrypto is
-    absent, and a naive grep reads that explanation as a declaration. A source-scanning
-    assertion has to distinguish code from prose or it fails on the comment that justifies
-    it.
-    """
-    return "\n".join(re.sub(r"--.*$", "", line) for line in sql.splitlines())
+#: The check matches its own documentation without a stripper: 0001 explains *why* pgcrypto
+#: is absent, and a naive grep reads that explanation as a declaration. Stripping happens in
+#: `tests/_support/sourcescan.py`, which three other checks in this suite share — the fix
+#: belongs at the layer where a fourth instance is impossible, not in this file.
+_PGCRYPTO = re.compile(r"CREATE\s+EXTENSION.*pgcrypto", re.IGNORECASE)
 
 
 def test_no_migration_reintroduces_pgcrypto():
-    for m in discover():
-        assert not re.search(
-            r"CREATE\s+EXTENSION.*pgcrypto", _strip_sql_comments(m.sql), re.IGNORECASE
-        ), f"{m.path.name} declares pgcrypto; gen_random_uuid() is core in PostgreSQL 13+"
+    result = sourcescan.scan(
+        [MIGRATIONS_DIR], [_PGCRYPTO], suffixes=(".sql",), relative_to=REPO_ROOT
+    )
+    assert result.files_scanned >= 10, (
+        f"only {result.files_scanned} migrations scanned; a scanner with nothing to scan "
+        "passes vacuously"
+    )
+    assert not result.findings, (
+        "a migration declares pgcrypto; gen_random_uuid() is core in PostgreSQL 13+:\n"
+        + sourcescan.render(result.findings)
+    )
 
 
 async def test_schema_migrations_is_recorded(owner_conn):

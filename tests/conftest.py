@@ -407,6 +407,20 @@ def authorize_signed(nonce_store, signer, settings):
     from dwaar.crypto import http_sig
     from dwaar.crypto import keys as keymod
 
+    # Real stages need real collaborators. A pipeline test run without an observation store
+    # and without a scorer exercises the two degraded paths and nothing else — every record
+    # it writes would carry `features_degraded` and `risk_model_unavailable`, and the tests
+    # asserting on `degraded_mode` would be asserting about the test harness.
+    #
+    # One store per fixture instance, so windows do not leak between tests. The scorer
+    # returns a fixed, confidently-benign score: tests that care about a specific score pass
+    # their own, and a low default keeps an `allow` an `allow`.
+    from dwaar.risk.observations import InMemoryObservationStore
+    from tests._support.fakes import FixedScorer
+
+    default_store = InMemoryObservationStore()
+    default_scorer = FixedScorer(0.05)
+
     async def _run(conn, request: AuthorizeRequest, *, commit=True, private_key=None,
                    created=None, nonce=None, path="/v1/authorize", **kw):
         body = _json.dumps(
@@ -426,6 +440,8 @@ def authorize_signed(nonce_store, signer, settings):
             created=created if created is not None else int(_time.time()),
             nonce=nonce or _uuid.uuid4().hex,
         )
+        kw.setdefault("observation_store", default_store)
+        kw.setdefault("scorer", default_scorer)
         outcome = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings,
             headers=headers, body=body, path=path, nonce_store=nonce_store, **kw

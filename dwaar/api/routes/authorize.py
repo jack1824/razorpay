@@ -52,6 +52,17 @@ class AuthorizeBody(BaseModel):
     sku: Annotated[str | None, Field(default=None, max_length=128)]
     free_text: dict[str, Annotated[str, Field(max_length=2000)]] = Field(default_factory=dict)
 
+    # Behavioural context. Both are hashed before they are stored and neither reaches the
+    # decision record in raw form — BIN *diversity* and cart *mutation* are the signals, and
+    # counting distinct things does not require keeping the values.
+    #
+    # The BIN is six digits and nothing more. A pattern rather than a length check, because
+    # "the first six digits of a card number" has a shape, and accepting a full PAN here —
+    # which a caller will eventually send by accident — would put a card number into a
+    # rolling window and a hash of one into an append-only row.
+    instrument_bin: Annotated[str | None, Field(default=None, pattern=r"^[0-9]{6}$")]
+    cart_id: Annotated[str | None, Field(default=None, max_length=64)]
+
 
 class DecisionResponse(BaseModel):
     decision: Literal["allow", "bound", "throttle", "step_up", "deny"]
@@ -90,6 +101,8 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
         category=body.category,
         sku=body.sku,
         free_text=body.free_text,
+        instrument_bin=body.instrument_bin,
+        cart_id=body.cart_id,
     )
 
     async with app.state.pool.connection() as conn:
@@ -106,6 +119,8 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
                 path=request.url.path,
                 nonce_store=app.state.nonce_store,
                 policy_store=app.state.policy_store,
+                observation_store=app.state.observation_store,
+                scorer=app.state.scorer,
             )
         except pipeline.Unauthenticated:
             await conn.rollback()

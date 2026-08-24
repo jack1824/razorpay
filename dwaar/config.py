@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     signing_seed: int = Field(default=20260905, alias="DWAAR_SIGNING_SEED")
     keys_dir: Path = Field(default=Path(".keys"), alias="DWAAR_KEYS_DIR")
 
+    # Where the risk model bundle lives. A directory rather than a file because a bundle is
+    # three artifacts that must agree — two ONNX graphs and the JSON that names the feature
+    # ordering they were trained against. Pointing this at a stale directory is caught at
+    # load time, not at scoring time: `dwaar/risk/model.py` refuses a bundle whose feature
+    # list differs from the code's, because a mismatched ordering produces confident
+    # nonsense rather than an error.
+    model_dir: Path = Field(default=Path("models/risk"), alias="DWAAR_MODEL_DIR")
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

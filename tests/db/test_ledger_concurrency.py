@@ -215,3 +215,43 @@ async def test_invariants_hold_globally(owner_dsn, migrated):
 
     assert result["negative_balances"] == 0, "balance_after < 0 exists — the hard invariant broke"
     assert result["sum_delta_drift"] == 0, "sum(deltas) != balance for at least one mandate"
+
+
+async def test_the_named_conflict_target_does_not_swallow_the_tripwire(
+    app_dsn, committed_mandate, monkeypatch
+):
+    """The whole reason the `ON CONFLICT` target is named rather than bare.
+
+    `ON CONFLICT DO NOTHING` with no target absorbs EVERY unique violation on the table —
+    including `budget_ledger_chain_unique`, which fires only when two writers got past the
+    mandate row lock, which means an overspend. Absorbed, that would return `duplicate=True`
+    and the caller would report a successful idempotent retry over a detected overspend.
+
+    Naming `budget_ledger_mandate_idempotency_unique` means exactly one constraint is
+    absorbed and the tripwire still raises. This forces the tripwire by handing `_append` a
+    stale tail — the same state a failed lock would produce — and asserts it raises rather
+    than reporting a duplicate.
+    """
+    from dwaar.errors import LedgerError
+
+    mandate_id = committed_mandate["mandate_id"]
+
+    async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
+        genesis = await budget_ledger._tail(conn, mandate_id)
+        await budget_ledger.reserve(
+            conn, mandate_id=mandate_id, amount_paise=1_000, idempotency_key="first"
+        )
+        await conn.commit()
+
+        # Every subsequent append now believes the genesis entry is still the tail, so the
+        # insert collides on (mandate_id, prev_entry_id) with the row written above.
+        async def stale_tail(_conn, _mandate_id):
+            return genesis
+
+        monkeypatch.setattr(budget_ledger, "_tail", stale_tail)
+
+        with pytest.raises(LedgerError, match="tripwire fired"):
+            await budget_ledger.reserve(
+                conn, mandate_id=mandate_id, amount_paise=1_000, idempotency_key="second"
+            )
+        await conn.rollback()

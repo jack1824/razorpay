@@ -14,10 +14,11 @@ import psycopg
 import pytest
 
 from dwaar.authorize import pipeline
-from dwaar.authorize.types import AuthorizeRequest, RiskResult
+from dwaar.authorize.types import AuthorizeRequest
 from dwaar.crypto.signer import ensure_registered
 from dwaar.db.repositories import policies as policy_repo
 from dwaar.policy.store import NO_COMPILED_POLICY, PolicyStore
+from tests._support.fakes import FixedScorer
 from tests.conftest import rand_id
 
 pytestmark = pytest.mark.db
@@ -224,11 +225,12 @@ async def test_policy_deny_beats_a_benign_risk_score_through_the_pipeline(
     await setup.close()
 
     # The model says this is fine. The policy says it is not.
-    async def benign(request, features):
-        return RiskResult(ok=True, risk_score=0.01, model_version="lgbm-test",
-                          injection_flag=False)
-
-    monkeypatch.setattr(pipeline.risk_stage, "score_risk", benign)
+    #
+    # Injected as a SCORER rather than by monkeypatching the stage, so the real stage 4
+    # runs: a patched stage would prove the pipeline honours whatever `score_risk` returns,
+    # which is not the claim. The claim is that a policy deny survives a genuine, confident,
+    # benign score travelling the whole way through the real code.
+    benign = FixedScorer(0.01, model_version="lgbm-test")
 
     request = AuthorizeRequest(
         agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"], action="purchase",
@@ -245,6 +247,7 @@ async def test_policy_deny_beats_a_benign_risk_score_through_the_pipeline(
         outcome = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings, headers=headers,
             body=body, nonce_store=nonce_store, policy_store=PolicyStore(ttl_seconds=0),
+            scorer=benign,
         )
         await conn.commit()
         from dwaar.db.repositories import decision_records

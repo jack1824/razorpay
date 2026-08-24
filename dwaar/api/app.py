@@ -1,8 +1,16 @@
 """FastAPI application factory.
 
-Note what this module does *not* import: no LLM client, no risk model, no `zoo`. That is
-not incidental — `tests/test_hot_path_purity.py` walks the transitive import closure from
-here and fails the build if an LLM ever becomes reachable from a request path.
+Note what this module does *not* import: no LLM client, no `zoo`, and no training
+framework. That is not incidental — `tests/test_hot_path_purity.py` walks the transitive
+import closure from here and fails the build if either an LLM or a trainer becomes
+reachable from a request path.
+
+It DOES import `dwaar.risk.model`, and only here. The scorer is built once at startup and
+injected into the pipeline, so the request path itself never imports ONNX Runtime or numpy:
+`dwaar/authorize/stages/risk.py` accepts anything satisfying a small protocol. The point is
+not to hide a dependency but to keep the thing that loads a 20MB inference runtime at the
+composition root, where startup can pay for it and a failure to load can be reported as a
+degraded component rather than a crash.
 
 The pool opened here uses ``DATABASE_URL_APP``: the non-owner role. The API has no
 connection capable of UPDATE or DELETE on ``decision_records``, and that is what makes the
@@ -26,6 +34,8 @@ from dwaar.crypto.signer import derive_signer, ensure_registered
 from dwaar.logging import configure_logging, get_logger
 from dwaar.nonce import RedisNonceStore
 from dwaar.policy.store import PolicyStore
+from dwaar.risk import model as riskmodel
+from dwaar.risk.observations import RedisObservationStore
 
 log = get_logger("dwaar.api")
 
@@ -70,9 +80,29 @@ async def lifespan(app: FastAPI):
     app.state.redis = redis
     app.state.nonce_store = RedisNonceStore(redis)
 
+    # Rolling behavioural windows. Same Redis, different failure posture from the nonce
+    # store above: this one DEGRADES. Losing behavioural context costs judgment; losing
+    # replay defence would cost authentication.
+    app.state.observation_store = RedisObservationStore(redis)
+
     # One store per process, TTL-bounded. Hot-reloadable without a restart; replaced
     # wholesale so a request never sees a half-swapped ruleset.
     app.state.policy_store = PolicyStore()
+
+    # The risk model. Loaded and PRE-WARMED here, never lazily on a request: ONNX Runtime
+    # specialises kernels on first use, and paying that on the first authorize would be a
+    # p99 breach caused entirely by the first request being first.
+    #
+    # `load()` returns None rather than raising when there is no bundle. A missing model is
+    # a degraded state, not a broken one — the gate, the policy engine and the ledger are
+    # unaffected, and every record made in that window says `risk_model_unavailable`.
+    app.state.scorer = riskmodel.load(settings.model_dir)
+    log.info(
+        "risk_model",
+        loaded=app.state.scorer is not None,
+        model_version=getattr(app.state.scorer, "model_version", None),
+        directory=str(settings.model_dir),
+    )
 
     log.info("startup", version=__version__, component="api")
     try:

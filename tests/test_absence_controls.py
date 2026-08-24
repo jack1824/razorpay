@@ -27,6 +27,7 @@ import re
 
 import pytest
 
+from tests._support import sourcescan
 from tests._support.importgraph import REPO_ROOT, build_synthetic_package, find_path_to
 
 # ── ground-truth isolation ──────────────────────────────────────────────────────────
@@ -178,42 +179,42 @@ def test_no_middleware_uses_basehttpmiddleware():
     Two defects, one cause. Per the standing rule the fix is the layer — so this asserts
     the layer, rather than trusting that nobody reaches for it again.
     """
-    offenders = _find_basehttpmiddleware_usage(REPO_ROOT / "dwaar")
-    assert not offenders, (
+    result = _scan_dwaar(_BANNED_MIDDLEWARE)
+    assert not result.findings, (
         "BaseHTTPMiddleware is banned in this application — it is incompatible with the "
         "streaming responses the console depends on, and it hides the request body from "
-        "middleware that needs it. Write pure ASGI:\n" + "\n".join(offenders)
+        "middleware that needs it. Write pure ASGI:\n"
+        + sourcescan.render(result.findings)
     )
 
 
-#: Matches USAGE, not the word. `middleware.py` documents at length why the class is
-#: banned, and a bare-substring grep flagged its own explanation — the same way the
-#: pgcrypto check once matched the comment saying pgcrypto is not used. A source scan has
-#: to distinguish code from prose or it fails on the text that justifies it.
-_USAGE_PATTERNS = (
-    re.compile(r"^\s*from\s+starlette\.middleware\.base\s+import", re.M),
-    re.compile(r"^\s*class\s+\w+\(\s*BaseHTTPMiddleware\s*\)", re.M),
-    re.compile(r"^\s*import\s+starlette\.middleware\.base", re.M),
+#: Bare mentions of the name, which is only safe because `_scan_dwaar` removes comments and
+#: docstrings first. Before the shared stripper existed this had to match import and
+#: subclass syntax specifically, because `dwaar/api/middleware.py` documents at length why
+#: the class is banned and the check flagged its own explanation. Matching the name is
+#: strictly broader: it also catches `app.add_middleware(BaseHTTPMiddleware, ...)`, which
+#: subclasses nothing and which the narrower patterns missed.
+_BANNED_MIDDLEWARE = (
+    re.compile(r"\bBaseHTTPMiddleware\b"),
+    re.compile(r"starlette\.middleware\.base"),
 )
 
 
-def _find_basehttpmiddleware_usage(root) -> list[str]:
-    offenders = []
-    for path in sorted(root.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for pattern in _USAGE_PATTERNS:
-            for match in pattern.finditer(text):
-                line = text[: match.start()].count("\n") + 1
-                try:
-                    label = path.relative_to(REPO_ROOT)
-                except ValueError:
-                    label = path  # a synthetic probe outside the repo
-                offenders.append(f"  {label}:{line}")
-    return offenders
+def _scan_dwaar(patterns) -> sourcescan.ScanResult:
+    result = sourcescan.scan([REPO_ROOT / "dwaar"], patterns, relative_to=REPO_ROOT)
+    assert result.files_scanned >= 20, (
+        f"only {result.files_scanned} sources scanned under dwaar/; a scanner with nothing "
+        "to scan passes vacuously"
+    )
+    return result
 
 
 def test_the_ban_check_would_catch_a_reintroduction(tmp_path):
-    """Positive control. The check must fire on real usage and stay silent on prose."""
+    """Positive control. The check must fire on real usage and stay silent on prose.
+
+    The stripper has its own controls in `tests/test_source_scan.py`; this asserts the two
+    are wired together, which is the part that could silently come undone.
+    """
     package = tmp_path / "probe"
     package.mkdir()
 
@@ -222,7 +223,7 @@ def test_the_ban_check_would_catch_a_reintroduction(tmp_path):
         "class Sneaky(BaseHTTPMiddleware):\n    pass\n",
         encoding="utf-8",
     )
-    assert _find_basehttpmiddleware_usage(package), (
+    assert sourcescan.scan([package], _BANNED_MIDDLEWARE).findings, (
         "the ban check does not detect an actual import and subclass; it is enforcing "
         "nothing"
     )
@@ -233,7 +234,23 @@ def test_the_ban_check_would_catch_a_reintroduction(tmp_path):
         "# BaseHTTPMiddleware is banned here.\n",
         encoding="utf-8",
     )
-    assert not _find_basehttpmiddleware_usage(package), (
+    assert not sourcescan.scan([package], _BANNED_MIDDLEWARE).findings, (
         "the ban check fires on prose that merely mentions the class — the same failure "
         "as a grep matching the comment that explains why something is absent"
     )
+
+
+def test_the_real_middleware_module_still_explains_itself():
+    """The prose the check must tolerate is prose we actually want to keep.
+
+    If someone silences a future false positive by deleting the explanation rather than by
+    fixing the scanner, this fails. The stripper exists so that the docstring and the check
+    can coexist; that is only worth anything if the docstring is still there.
+    """
+    text = (REPO_ROOT / "dwaar" / "api" / "middleware.py").read_text(encoding="utf-8")
+    assert "BaseHTTPMiddleware" in text, (
+        "dwaar/api/middleware.py no longer explains why BaseHTTPMiddleware is banned"
+    )
+    assert not sourcescan.scan(
+        [REPO_ROOT / "dwaar" / "api" / "middleware.py"], _BANNED_MIDDLEWARE
+    ).findings

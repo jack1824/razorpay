@@ -742,3 +742,295 @@ test asserts the delegation is present and the fabricated disconnect is gone.
 **Worth noting about how it was found:** both of these are interaction bugs between two
 components that are individually correct and individually tested. Nothing short of running
 the real console against the real API would have produced either.
+
+---
+
+## 2026-08-27 — Phase 6: features, traffic, model
+
+---
+
+### F-023 — The test suite is strong on components and weak on interactions — NOTED
+
+**Found:** reflecting on F-021 and F-022 after the fact.
+
+Both Phase 5 defects were interaction bugs between components that were individually correct
+and individually tested. `TraceIDMiddleware` was correct. `StreamingResponse` was correct.
+`BodySizeLimitMiddleware` was correct. `request.is_disconnected()` was correct. Each pair was
+wrong together.
+
+This is the normal failure mode of a suite built the way this one was — bottom-up, with a
+test written beside each unit as it landed. 698 tests and neither defect was reachable from
+any of them, because no test put a real streaming response behind a real middleware stack.
+
+**Not a defect, so nothing is being fixed here.** It is recorded because it predicts where
+the next one comes from: the seam between two things that each work. Phase 6 adds four such
+seams — feature computation against a live Redis, the model session against the pipeline's
+latency budget, the zoo's signing against the gateway's verification, and the arithmetic gate
+against a stage 4 that now actually runs. The zoo making real signed HTTP calls rather than
+fabricated traces is the mitigation, and it is the same mitigation the console was.
+
+---
+
+### F-007 correction — the savepoint was replaced, and its justification was wrong
+
+**Found:** review of `DEFENSE.md`, which stated that the savepoint was preferable to a named
+`ON CONFLICT` target. It is not, and the argument given for it — "less SQL" — does not
+survive contact with anyone who asks.
+
+F-007's fix was correct about the failure it addressed: a `UniqueViolation` poisons the whole
+transaction, so the recovery `SELECT` written after it can never run, and a savepoint keeps
+the transaction usable. That reasoning stands.
+
+The conclusion drawn from it did not. The correct concern was that a **bare**
+`ON CONFLICT DO NOTHING` would also swallow `UNIQUE (mandate_id, prev_entry_id)` — the
+tripwire that fires only when the mandate lock is not holding, which means an overspend. But
+`ON CONFLICT ON CONSTRAINT budget_ledger_mandate_idempotency_unique DO NOTHING RETURNING *`
+targets one constraint and leaves the other raising. It gives everything the savepoint gives,
+never enters a failed transaction state, and costs one fewer round trip on the duplicate
+path.
+
+**What we got wrong:** we identified a real hazard in one form of the alternative and then
+rejected the alternative rather than the form. Ruling out `ON CONFLICT` on the strength of
+what a *bare* `ON CONFLICT` does is the same shape as ruling out a tool because of its
+default configuration.
+
+**Fix:** `dwaar/db/repositories/budget_ledger.py` uses the named target; the savepoint is
+gone. The chain tripwire is caught and re-raised as a `LedgerError` carrying its explanation,
+because a bare constraint name three frames down is not an answer. A new test forces the
+tripwire with a stale tail and asserts it raises rather than being reported as a duplicate.
+`DEFENSE.md` entry 1 is rewritten around why the target must be named.
+
+**Noticed while making the change:** since migration 0012 scoped the idempotency constraint
+to `(mandate_id, idempotency_key)`, the duplicate-recovery branch is unreachable under
+correct locking — any writer of that key holds the same mandate lock. It is a second tripwire
+wearing a recovery path's clothes. Kept, because a duplicate webhook must not become an error
+just because our locking is suspect, but it now logs a warning saying exactly that.
+
+---
+
+### F-024 — `test_no_label_leakage.py` did not exist — FIXED
+
+**Found:** implementing the feature-layer leakage check the project owner asked for, which
+was phrased as *"extend `test_no_label_leakage` to the feature layer"*.
+
+`docs/strategy/10_SIMULATION/SIMULATION.md` states, as the third of three structural
+defences:
+
+> `tests/test_no_label_leakage.py` asserts that no feature name or field in the request
+> payload correlates with archetype by construction.
+
+There was no such file, and there never had been. The extension had nothing to extend.
+
+**Why it matters:** this is the same shape as F-012 — a control described in the package's
+prose and never shipped — and it is the third time. The first was `docs/strategy/16_DEMO_DATA`
+claiming a CI test asserting `dwaar/` never reads `ground_truth.json`; the second was three
+false claims transcribed into THREAT_MODEL and FAIL_MATRIX. The pattern is stable enough to
+state as a rule: **the package's prose describes intent, not the repository.** Every control
+it names has to be located in code or written, and "the package says there is a test" is not
+evidence that there is one.
+
+**Fix:** written, both halves. The request layer asserts no archetype name appears in any
+request, that no single request field takes disjoint values across archetypes, and that
+`dwaar/` cannot read the run manifest. The feature layer computes Cramér's V per feature
+against the archetype and is enforced in `tools/train_risk.py`, which **refuses to write a
+bundle** when any feature exceeds the threshold — a test that only reports would be a test
+someone overrides at 2am.
+
+---
+
+### F-025 — `session_duration_s` was zero for every agent — FIXED
+
+**Found:** by a unit test written at the same time as the feature.
+
+```python
+session_start = ordered[-1].ts      # `ordered` is ASCENDING; [-1] is the NEWEST
+```
+
+The session was taken to start at the most recent event, so for any agent without a
+thirty-minute gap in its history the duration was `now - now`. The feature was present in
+every vector, written into every record, fed to the model, and constant.
+
+**Why it matters:** a constant feature is not a weak feature, it is a missing one wearing a
+name. It would have been in the feature list on a slide, in `decision_records.features` on
+the console, and in the model's importances at exactly 0.0 — and the natural reading of a
+zero importance is "this behaviour does not matter", not "this column contains nothing".
+
+**Fix:** start at `ordered[0]` and advance to the first event after each long gap.
+
+---
+
+### F-026 — Two features were constant because the histogram could not see the data — FIXED
+
+**Found:** the same test run. `cadence_entropy` was 0.0 for a machine-regular agent AND for
+a ragged one, which is the assertion that caught it.
+
+Both entropy features bucket log-spaced, which is right. The buckets were whole decades
+starting at 10^0:
+
+```python
+return min(decades - 1, max(0, int(math.log10(value))))
+```
+
+Inter-arrival gaps for agents live between about 0.1s and 100s. Every gap under one second
+floors to bucket 0, so a card tester firing every 0.4s and a shopper pausing 4s landed in the
+same two buckets, and the entropy over them was zero for both.
+
+**What we got wrong:** the bucketing was chosen from the *quantity's* range — seconds span
+many orders of magnitude — rather than from the range the *data* actually occupies. Those are
+different questions and only the second one matters.
+
+**Fix:** half-decade buckets with an explicit floor, 10ms for gaps and ₹1 for amounts. The
+test that caught it asserts a regular agent scores lower than a ragged one rather than
+asserting a number, so it stays meaningful if the bucketing is tuned again.
+
+---
+
+### F-027 — `burst_index` partly encoded how long we had been watching — FIXED
+
+**Found:** while fixing the test above. Not a crash; a correctness argument.
+
+The burst index divided the last minute's request count by `velocity_1h / 60` — the average
+per-minute rate, assuming an hour of history exists. For an agent observed for twenty
+minutes, the denominator understates the true rate threefold and the agent reads as bursty
+for no reason except being new.
+
+**Why it matters more than it sounds:** session length differs by archetype. A feature that
+tracks how long we have been watching an agent is a feature that partly encodes the label —
+a soft version of exactly what `dwaar/risk/features.py` exists to prevent, and one that no
+signature check or import walk would catch because nothing about the plumbing is wrong.
+
+**Fix:** normalise by the observed span rather than a flat sixty minutes. A separate upward
+bias at very low rates is inherent to a counting window, is monotone in the rate, and is
+documented at the computation rather than silently corrected.
+
+---
+
+### F-028 — The SKU alone partitioned two archetypes — FIXED
+
+**Found:** by `test_no_single_request_field_identifies_the_archetype`, on its first run.
+
+The card tester drew its SKUs from the six cheapest catalogue items and the budget breacher
+from the eight most expensive. The two sets were disjoint, so the SKU field identified which
+of the two an agent was — with certainty.
+
+**Whether it could actually have leaked:** no. The gateway hashes a SKU and uses only
+distinct *counts*; no feature reads a SKU's identity. But "it could not have reached the
+model" is a weaker defence than it sounds, because the property the simulation spec demands
+is that the classes are not separable by construction, and a judge reading the generator
+would find this in a minute.
+
+**What we got wrong:** both choices were made for narrative reasons — a card tester "should"
+buy cheap things, a breacher "should" target expensive ones — and neither was behaviourally
+load-bearing. The card tester's amount is drawn independently of the item's price, and the
+breacher's is computed from the cap. Two decisions that changed nothing about behaviour
+produced a perfect partition of the label.
+
+**Fix:** the card tester draws from the whole catalogue and the breacher from the more
+expensive half, so the pools overlap. The test samples eight agents per archetype rather than
+one, because a single agent picking two SKUs is disjoint from another by chance rather than
+by construction.
+
+---
+
+### F-031 — Training on traffic the previous model shaped is a closed loop — FIXED
+
+**Found:** comparing two consecutive traffic runs. The first, against a gateway with no model
+loaded, denied 17% of requests. The second, against a gateway serving the model trained on
+the first, denied 44% — including **636 of 640** card-testing requests.
+
+That looks like the model working, and it is. It is also a training-set catastrophe.
+
+A denied request never reaches a card. A card that is never presented never produces a
+decline. So the simulated PSP recorded almost no outcomes for card testers, and
+`failure_ratio` — the feature that most directly describes card testing — came back near zero
+for the archetype it exists to describe. A model trained on that run would have inherited the
+first model's blind spot and called it evidence.
+
+**What is and is not affected.** Feature *values* are computed at stage 3, before any verdict,
+so they are untouched. What a loaded model changes is **which requests reached a card at
+all**, and therefore what the PSP ever had an opinion about. This is ordinary selection bias,
+and it is the reason production fraud models need explicit holdout traffic.
+
+**Fix:** the bootstrap traffic is generated against a gateway started with
+`DWAAR_MODEL_DIR=/nonexistent`, so only the deterministic layer decides. `tools/train_risk.py`
+now **refuses to train** when any training row carries a `model_version` — a fact the gateway
+recorded, not a promise the operator made — with an `--allow-model-shaped` escape hatch for a
+deliberate retrain where the bias has been accounted for.
+
+**Worth noticing about how it was found:** nothing failed. Both runs completed, both trained,
+and the second model's metrics would have looked fine. It was visible only by comparing the
+per-archetype decision counts of two runs side by side — which is not a check anything
+automates, and is now a documented step in `zoo/README.md`.
+
+---
+
+### F-032 — The 3% class overlap was decorative — FIXED
+
+**Found:** by the trainer's own report, on the first run that measured it.
+`legitimate agents built to look suspicious: 1 agent(s), 0/17 rows flagged (0.0%)`.
+
+The simulation spec requires ~3% of legitimate agents to exhibit adversary-like bursts, and
+requires them to **produce false positives** — without that overlap, the false-positive cost
+in rupees is fiction. The flag was implemented, the agents were marked, the fraction came out
+at 3.3%, and the model flagged none of them.
+
+The model was right. The "burst" was a run of same-category purchases at roughly ten times a
+shopper's normal rate — about fifteen requests a minute. A card tester runs at two hundred and
+forty. Fifteen a minute is a busy afternoon, not an anomaly, and no model should fire on it.
+
+**What we got wrong:** "adversary-like" was implemented as *faster than this agent usually is*
+rather than *inside the region where the adversaries live*. Those are different targets, and
+only the second one produces a false positive. A burst nothing would ever flag is an overlap
+that exists in the README and nowhere else — which is exactly the failure the requirement was
+written to prevent, reproduced by satisfying it literally.
+
+**Fix:** the burst now models a specific, entirely legitimate scenario — **a customer whose
+card keeps being declined, retrying fast, reaching for a second and third card.** That moves
+all four of the signals that define card testing at once: velocity, cadence regularity, BIN
+diversity and decline ratio. It is the customer the model blocks, and being able to point at
+them by name is the whole reason the overlap exists.
+
+The burst now fires at a seeded request index rather than on a per-request coin flip, because
+"the overlap did not happen this run" is indistinguishable from "there is no overlap". The
+test asserts the four signals rather than asserting that something changed.
+
+**The control that caught it is worth more than the fix:** the trainer reports the bursty
+agents' flag rate across every split, names which split they fell in, and prints a warning
+when the number is zero. A metric reported only on the test split would have said nothing at
+all here — the single bursty agent landed in the training set.
+
+---
+
+### F-033 — The latency gate was measuring a pipeline with two stages missing — FIXED
+
+**Found:** reading the per-stage table after stage 4 became real.
+
+```
+  record_observation       p99=  0.000ms
+  score_risk               p99=  0.002ms
+```
+
+Zero milliseconds for a Redis round trip and two microseconds for ONNX inference. Both
+stages were short-circuiting: `tests/db/test_authorize_latency.py` called
+`pipeline.authorize` without an `observation_store` and without a `scorer`, so the store was
+`None`, the window came back as `EMPTY`, and the risk stage returned its fail-open constant
+before touching a model.
+
+**The gate was green over a pipeline that had never run inference.** Reported p99 2.80ms.
+The real figure, with both collaborators supplied, is 5.66ms — still comfortably inside the
+25ms budget, but 2.80ms was not a measurement of anything we ship.
+
+**What we got wrong:** the collaborators are optional parameters, and optional parameters
+default to the degraded path. That is correct for the *application* — a missing Redis must
+degrade, not crash — and it is exactly wrong for a *benchmark*, which needs the opposite
+default. The same design decision was right in one place and silently wrong in another.
+
+**Fix:** the latency tests require the real scorer and a real Redis store, and **skip** when
+either is unavailable rather than measuring the cheaper pipeline. Every run now asserts
+`degraded_mode == []` on the outcome it measured — the control that makes it impossible for a
+missing collaborator to turn the gate into a measurement of something else.
+
+**The general shape, which is the reason this is recorded:** this is a hardcoded metric
+wearing a measurement's clothes. Rule 4 says every number is computed at run time, and this
+one was — it was just computing a different quantity than its label claimed. *Computed* and
+*measuring the right thing* are separate properties, and only the first one had a control.

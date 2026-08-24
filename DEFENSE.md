@@ -1,20 +1,27 @@
 # Defence
 
-Six decisions that are not obvious, with the alternative each one rejected. Where a choice
+Eight decisions that are not obvious, with the alternative each one rejected. Where a choice
 has a real cost, the cost is stated.
 
 ---
 
-## 1. `reserve()` wraps its INSERT in a savepoint
+## 1. The ledger's `ON CONFLICT` names its constraint
 
-**The decision.** The ledger insert runs inside a savepoint, so a unique-key collision rolls
-back one statement rather than the transaction.
+**The decision.** The ledger insert is
 
-**What was rejected.** The obvious shape:
+```sql
+INSERT INTO budget_ledger (...)
+ON CONFLICT ON CONSTRAINT budget_ledger_mandate_idempotency_unique
+DO NOTHING RETURNING *
+```
+
+and the conflict target is **named**, never bare.
+
+**What was rejected, first.** The obvious shape:
 
 ```python
 try:
-    INSERT INTO budget_ledger (...)          # idempotency_key is UNIQUE
+    INSERT INTO budget_ledger (...)          # (mandate_id, idempotency_key) is UNIQUE
 except UniqueViolation:
     return SELECT ... WHERE idempotency_key = ?   # return the original
 ```
@@ -28,20 +35,47 @@ the failure.
 Duplicate webhooks are the most common bug in payment integrations, so this path is not
 exotic — it is the one that runs whenever a network retries.
 
-**Why the savepoint.** `async with conn.transaction()` inside an open transaction issues a
-`SAVEPOINT`. The violation rolls back to it, the transaction survives, and the winning row
-can be read and returned.
+**What was rejected, second, and this is the interesting one.** A bare
+`ON CONFLICT DO NOTHING`. It fixes the transaction-state problem and introduces a worse one.
 
-**The better shape, and its cost.** `INSERT ... ON CONFLICT (...) DO NOTHING RETURNING *`,
-then `SELECT` on an empty return. The transaction never enters a failed state at all, so no
-savepoint is needed. That is what `decision_records` uses.
+This table carries two unique constraints, and they mean opposite things:
 
-The ledger does not, and deliberately: a bare `ON CONFLICT DO NOTHING` would also swallow a
-violation of `UNIQUE (mandate_id, prev_entry_id)` — the tripwire that fires only if the
-mandate row lock is not holding, which means an overspend. That must never be absorbed
-silently. Naming a specific conflict target is possible; the savepoint keeps the two
-outcomes distinguishable with less SQL, at the cost of one extra round trip on the duplicate
-path.
+| Constraint | Fires when | Correct response |
+|---|---|---|
+| `(mandate_id, idempotency_key)` | a webhook was delivered twice | absorb it, return the original |
+| `(mandate_id, prev_entry_id)` | two writers computed a balance from the same predecessor | **abort loudly** |
+
+The second is a tripwire. Under a held mandate-row lock it can never fire; if it fires, the
+lock is not holding, and two transactions have each written a balance derived from the same
+tail. That is an overspend the `CHECK (balance_after >= 0)` cannot catch, because each row
+satisfies it individually.
+
+`ON CONFLICT DO NOTHING` with no target absorbs **both**. The tripwire insert would be
+silently skipped, `RETURNING` would come back empty, the code would look up the "existing"
+row and hand the caller `duplicate=True`. A detected overspend would be reported as a
+successful idempotent retry. That is the single worst outcome available in this file.
+
+Naming the constraint absorbs exactly one of the two and leaves the other raising, so the
+database distinguishes them rather than the application inspecting
+`exc.diag.constraint_name` after the fact. `tests/db/test_ledger_concurrency.py` forces the
+tripwire with a stale tail and asserts it still raises.
+
+**On the savepoint this replaced.** An earlier version wrapped the insert in
+`async with conn.transaction()`, which issues a `SAVEPOINT`, so a `UniqueViolation` rolled
+back one statement and left the transaction usable. That was correct, and it was not the
+best available shape. The named target is better on every axis: the transaction never enters
+a failed state at all, there is no extra round trip on the duplicate path, and the two
+constraints are separated by the database instead of by string-matching an error field. It
+was changed rather than defended.
+
+**One thing worth conceding.** Since the idempotency constraint was scoped from global to
+`(mandate_id, idempotency_key)`, the `DO NOTHING` branch is unreachable under correct
+locking — any other writer of that key must hold the same mandate lock, so it either
+committed before the under-lock re-check saw it or is still blocked behind us. The branch is
+kept, because a duplicate webhook must not become an error just because our locking is
+suspect, but it now logs a warning: reaching it means the mandate lock is not serialising
+writers. It is a second tripwire wearing a recovery path's clothes, and it is labelled as
+one in the code.
 
 ---
 
@@ -160,8 +194,28 @@ other needs the ledger.
 **The cost.** Authority logic is now in two places. That is a real maintenance hazard, and it
 is mitigated structurally: every gate rule uses a stable `mandate.*` prefix in `rule_fired`,
 and a test asserts `score_risk` is *never invoked* on a cap breach — a spy on the call, not
-an assertion about the resulting column, so it cannot pass vacuously while the model is
-stubbed.
+an assertion about the resulting column, so it could not pass vacuously while the model was
+stubbed, and it now runs against a model that genuinely scores.
+
+**The second half of the same idea, which is easier to get wrong.** Short-circuiting before
+the model is only half the claim. The other half is that the model cannot *learn* the gate:
+if a feature restated the per-transaction cap or the category lists, the model would predict
+the gate rather than describe behaviour, accuracy would look excellent because predicting a
+deterministic function is easy, and the feature importances would become a description of a
+rule.
+
+So the feature layer cannot see a mandate. Not "does not read one" — `compute()` has no
+parameter for it, no connection, no Redis client, and nothing it imports can reach the
+database or the authority stage. The proof that the wiring still honours it is behavioural:
+a test holds one request stream fixed, runs it under two mandates whose caps differ across
+the gate boundary — so the decisions genuinely differ — and asserts the feature vectors are
+identical.
+
+That test also pins an ordering that is easy to get backwards. The rolling window is written
+*before* the gate, not inside the feature stage. Written after, the window would contain only
+gate-permitted requests, every feature would be conditioned on the gate's own decision, and a
+budget breacher whose requests mostly die at the gate would look like a quiet agent with
+almost no history.
 
 ---
 
@@ -248,3 +302,124 @@ would not be.
 determined author can still work around — someone could open a socket. What the tests buy is
 that doing so is a deliberate act which fails the build, rather than a convenience someone
 reaches for at 2am while debugging.
+
+---
+
+## 7. The policy engine has a closed operator set instead of an expression language
+
+**The decision.** Policies are a small JSON tree over sixteen operators and a fixed
+namespace of variables. There is no `eval`, no attribute access, no function calls, no
+user-defined names. An expression the operator set does not cover cannot be written at all.
+
+**What was rejected.** CEL — Google's Common Expression Language — via `cel-python`. It is
+the obvious choice. It is sandboxed by design, it is a real specification with real
+implementations, and it would have taken an afternoon instead of two days.
+
+**Reason one: it enlarges the hot path's import closure.** Rule 1 in this project — no
+language model reachable from `/v1/authorize` — is enforced by walking the transitive
+imports of every request-path module and failing the build if any chain reaches a provider
+SDK. That check is only as good as our ability to reason about what the request path
+imports. A general expression language brings a lexer, a parser, an AST, an evaluator and
+their dependencies onto the path, and every one of them becomes a subtree we are asserting
+about without controlling. This reason is real but it is the weaker of the two.
+
+**Reason two, which is the actual argument: the author of these rules is a language model.**
+The compiler takes a merchant's English policy and emits a ruleset. A human then reviews it
+and approves it before it can serve traffic.
+
+What that human is reviewing depends entirely on the target language.
+
+With an expression language, review means answering *"what can this expression do?"* — and
+for anything non-trivial that is a question about the language, not about the policy. The
+reviewer has to think about evaluation order, coercion, what a comparison between mismatched
+types yields, whether a clever nesting reaches something it should not. Every one of those is
+a place where an approval can be correct about intent and wrong about behaviour. And the
+adversary here is not a hostile author: it is a model that will occasionally produce
+something syntactically valid and semantically surprising, in a file a busy human is about to
+sign.
+
+With a closed operator set, an emitted rule either **parses or is rejected**. There is no
+third outcome. The parser is a whitelist, so anything outside the set is a load error, not a
+subtle behaviour. That collapses review down to one question — *does this rule say what the
+merchant meant?* — which is a question about the policy, and the only question a human
+reviewer is actually qualified to answer quickly and repeatedly at 2am before a deadline.
+
+This generalises past this project. When a model writes artifacts a human must approve, the
+target language is a safety control, and the right target is the smallest language that can
+express the domain. Expressiveness you do not need is review burden you cannot delegate.
+
+**The cost, stated plainly.** Expressiveness. There is no arithmetic on the right-hand side,
+no string manipulation, no way to write a rule that compares two request fields to each
+other. A merchant policy that needs something the sixteen operators cannot say requires
+extending the language and shipping a release — a code change and a deploy, not a
+configuration change. For mandate-scoped authorisation, where the vocabulary is amounts,
+categories, counts and flags, that ceiling has not been reached. For a general-purpose rules
+engine it would be the wrong trade, and we would take CEL.
+
+**What it does not buy.** A closed operator set does not make a generated rule *correct*. A
+model can emit a perfectly parseable rule that permits what the merchant meant to forbid.
+That is what the generated property tests and the mandatory human approval are for; this
+decision only guarantees that the human is reviewing meaning rather than mechanism.
+
+---
+
+## 8. The risk model is trained on traffic we generated ourselves
+
+This entry is a concession rather than a defence. The objection is correct and there is no
+version of this project in which it is not.
+
+**The situation.** There is no public corpus of autonomous-agent payment traffic at
+meaningful scale. There is no proprietary one we have access to. So the behavioural model is
+trained on synthetic traffic produced by a generator written by the same person who wrote
+the model. Every accuracy number the model produces is, in the strictest reading, a
+measurement of how well one program predicts another program written by the same author.
+
+**What that objection destroys.** The model's precision, recall, AUC and per-archetype
+breakdown. Those numbers describe our generator. If the real distribution differs — and it
+will — they do not transfer, and we would not defend them if pushed. They are reported
+because omitting them would be worse, and they are labelled as artifacts wherever they
+appear.
+
+**What it does not touch, and this is the part that matters.** The claims this project
+actually rests on are properties of the code, and are true whatever traffic arrives:
+
+| Claim | Why the objection does not reach it |
+|---|---|
+| A per-transaction cap breach is denied by arithmetic before any model runs | Structural. The record carries `risk_score = NULL`, checkable by anyone reading it. |
+| Fifty concurrent writers against one ₹50,000 budget overspend by zero | Measured against PostgreSQL, not against a distribution. |
+| The decision chain detects a tampered row and names it | Ed25519 and SHA-256. Traffic-independent. |
+| The pipeline's p99 is under its budget with every stage named | Measured on real requests. |
+| Every component's failure mode is the one documented | Enforced by the fail-matrix constant and asserted by tests. |
+| No language model is reachable from the request path | Static import closure over the real source tree. |
+
+The uncomfortable version, said out loud: **if the risk model were deleted entirely, every
+claim in that table would still hold.** That is the design working as intended — the model
+can only tighten a decision, never grant one — but it is also the honest answer to "how much
+of this depends on the synthetic data". Very little, and the little that does is labelled.
+
+**The mitigation, and its limit.** Two of the six agent archetypes — `compromised` and
+`sleeper` — are held out. They are written in a session with no access to the model or its
+features, kept on a branch, not merged, and not run against the model until evaluation day.
+Their results are reported on a separate line, and those are the numbers worth reading.
+
+The limit is that **this is a solo build.** The design called for the adversary and the
+detector to have different authors, which is a genuinely strong control: two people cannot
+accidentally share an assumption they never discussed. What is actually in place is
+*isolation* — same author, no shared context, no access, no feedback loop — which is
+strictly weaker. The same person can independently invent the same tell twice, and no
+process control catches that. We are not claiming author separation anywhere, and this is
+the entry that says so.
+
+**The overlap requirement, which is the part most people miss.** The generator is required
+to make roughly 3% of *legitimate* agents behave in adversary-like bursts, and those
+requests **must** produce false positives. A generator whose classes are cleanly separable
+would give a model near-perfect scores and would make the one number we have committed to
+reporting honestly — the false-positive cost in rupees — pure fiction. A model that never
+fires on a good customer has not been tested against good customers who look bad for an
+afternoon. The overlap is asserted by the generator's tests, not assumed.
+
+**What would actually settle it.** Traffic from a real agent platform, with real disputes as
+labels, held out by someone with no stake in the result. Failing that, a shadow deployment
+where the model scores but never decides, compared against the outcomes the deterministic
+layer produced. Neither is available in a nine-day build, and neither is a reason to pretend
+the synthetic numbers are something they are not.

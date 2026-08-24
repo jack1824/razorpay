@@ -41,7 +41,10 @@ from psycopg.errors import UniqueViolation
 from dwaar import idempotency
 from dwaar.db.repositories.base import fetch_all, fetch_one
 from dwaar.errors import InsufficientBudget, LedgerError
+from dwaar.logging import get_logger
 from dwaar.money import Paise
+
+log = get_logger("dwaar.ledger")
 
 _COLUMNS = (
     "entry_id, mandate_id, prev_entry_id, delta_paise, balance_after, "
@@ -120,10 +123,13 @@ async def _append(
     # 2. Re-check the idempotency key, now that writers are serialised.
     #
     # The caller's pre-check runs unlocked and can miss a writer that had not committed
-    # yet. This one cannot, for any key on this mandate — which keeps the duplicate
-    # webhook on the ordinary path rather than the exception path. The exception path
-    # below still matters, because idempotency_key is globally unique and two different
-    # mandates can collide on one, where no mandate lock helps.
+    # yet. This one cannot, for any key on this mandate — which keeps the duplicate webhook
+    # on the ordinary path.
+    #
+    # Since migration 0012 scoped the constraint to `(mandate_id, idempotency_key)`, this
+    # re-check is the ONLY path a duplicate can legitimately take. The constraint is
+    # mandate-scoped and the mandate is locked, so the ON CONFLICT below became a second
+    # tripwire rather than a recovery path. It is kept, and it warns.
     duplicate = await get_by_idempotency_key(conn, mandate_id, idempotency_key)
     if duplicate is not None:
         return ReserveResult(
@@ -152,47 +158,78 @@ async def _append(
             public_reason="denied",
         )
 
-    # 5. Append, inside a SAVEPOINT.
+    # 5. Append, with a NAMED conflict target.
     #
-    # The savepoint is load-bearing, not tidiness. In PostgreSQL a failed statement aborts
-    # the WHOLE transaction: every subsequent command returns InFailedSqlTransaction until
-    # a rollback. Without the savepoint, a UniqueViolation here would leave the connection
-    # unusable and the duplicate-recovery SELECT below could never run — so the duplicate
-    # webhook, the single most common real payment-integration bug, would surface to the
-    # caller as an unrelated transaction error.
+    # `ON CONFLICT ON CONSTRAINT budget_ledger_mandate_idempotency_unique DO NOTHING`
+    # absorbs a duplicate idempotency key and NOTHING ELSE. A violation of
+    # `budget_ledger_chain_unique` — the tripwire that fires only when the mandate row lock
+    # is not holding, which means an overspend — still raises, exactly as it must.
+    #
+    # Naming the target is the whole decision. A bare `ON CONFLICT DO NOTHING` would swallow
+    # the tripwire too, turning a detected overspend into a silently-skipped insert and a
+    # `duplicate=True` the caller would report as a successful idempotent retry. Every
+    # `ON CONFLICT` in this repository names its constraint for that reason.
+    #
+    # This replaced a savepoint. The savepoint was correct — it kept the transaction usable
+    # after a UniqueViolation, which PostgreSQL otherwise poisons entirely — but the named
+    # target is better on every axis: the transaction never enters a failed state, there is
+    # no extra round trip on the duplicate path, and the tripwire is distinguished by the
+    # database rather than by inspecting `exc.diag.constraint_name` afterwards.
     try:
-        async with conn.transaction():
-            row = await fetch_one(
-                conn,
-                f"INSERT INTO budget_ledger "
-                f"(mandate_id, prev_entry_id, delta_paise, balance_after, idempotency_key, "
-                f" reason) VALUES (%s, %s, %s, %s, %s, %s) RETURNING {_COLUMNS}",
-                (
-                    mandate_id,
-                    tail["entry_id"],
-                    delta_paise,
-                    balance_after,
-                    idempotency_key,
-                    reason,
-                ),
-            )
+        row = await fetch_one(
+            conn,
+            f"INSERT INTO budget_ledger "
+            f"(mandate_id, prev_entry_id, delta_paise, balance_after, idempotency_key, "
+            f" reason) VALUES (%s, %s, %s, %s, %s, %s) "
+            f"ON CONFLICT ON CONSTRAINT budget_ledger_mandate_idempotency_unique "
+            f"DO NOTHING RETURNING {_COLUMNS}",
+            (
+                mandate_id,
+                tail["entry_id"],
+                delta_paise,
+                balance_after,
+                idempotency_key,
+                reason,
+            ),
+        )
     except UniqueViolation as exc:
+        # The only unique constraint left that this statement can violate. The transaction
+        # is now unusable, which is correct — we are aborting, not recovering. The catch is
+        # here purely so the failure arrives with its explanation attached instead of as a
+        # bare constraint name from three frames down.
         constraint = getattr(getattr(exc, "diag", None), "constraint_name", "") or ""
-        if "budget_ledger_chain_unique" in constraint:
-            # The tripwire fired. This is NOT a duplicate request — it means two writers
-            # got past the mandate lock, which should be impossible. Do not absorb it.
-            raise LedgerError(
-                f"ledger chain tripwire fired for mandate {mandate_id}: two entries share "
-                f"prev_entry_id={tail['entry_id']}. The mandate row lock is not holding. "
-                "See migrations/0003_budget_ledger.sql and ADR 0001 Q2."
-            ) from exc
+        if "budget_ledger_chain_unique" not in constraint:
+            raise
+        raise LedgerError(
+            f"ledger chain tripwire fired for mandate {mandate_id}: two entries share "
+            f"prev_entry_id={tail['entry_id']}. The mandate row lock is not holding. "
+            "See migrations/0003_budget_ledger.sql and ADR 0001 Q2."
+        ) from exc
 
-        # Idempotency key collision: another connection committed this key between our
-        # pre-check and our insert. The transaction is still usable because of the
-        # savepoint, so the winning entry can be read and returned.
+    if row is None:
+        # DO NOTHING fired, so a row with this (mandate_id, idempotency_key) already exists.
+        #
+        # Under a held mandate lock this is UNREACHABLE: any other writer of this key must
+        # also hold the lock, so it either committed before step 2 saw it or is still
+        # blocked behind us. Reaching here means the lock is not doing its job — the same
+        # signal the chain tripwire carries — so it is logged at warning rather than
+        # absorbed silently. Returning the winner is still the right answer for the caller;
+        # a duplicate webhook must not become an error because our locking is suspect.
         winner = await get_by_idempotency_key(conn, mandate_id, idempotency_key)
         if winner is None:
-            raise
+            raise LedgerError(
+                f"insert for mandate {mandate_id} conflicted on "
+                f"{idempotency_key!r} but no such entry is visible; the conflict target "
+                "and the lookup disagree about what uniqueness means"
+            )
+        # The event NAME carries the meaning, because the log allowlist admits identifiers
+        # and measurements only. What it means: the under-lock re-check missed a key that
+        # the unique constraint caught, so the mandate row lock is not serialising writers.
+        log.warning(
+            "ledger_idempotency_conflict_under_lock",
+            mandate_id=mandate_id,
+            entry_id=winner["entry_id"],
+        )
         return ReserveResult(
             entry_id=winner["entry_id"],
             balance_before=winner["balance_after"] - winner["delta_paise"],
@@ -238,8 +275,8 @@ async def reserve(
             duplicate=True,
         )
 
-    # _append re-checks the key under the mandate lock and absorbs a lost race via its
-    # savepoint, so there is no UniqueViolation to handle here.
+    # _append re-checks the key under the mandate lock and absorbs a lost race with a
+    # named ON CONFLICT target, so there is no UniqueViolation to handle here.
     return await _append(
         conn,
         mandate_id=mandate_id,

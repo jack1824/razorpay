@@ -22,6 +22,16 @@ discovering 300ms on day 11. Hence one of each.
 **Requests are signed outside every timed region.** Ed25519 signing is the *agent's* cost,
 not the gateway's; folding it in would inflate a number we then quote as ours. Signature
 *verification* is inside, because stage 1 is inside.
+
+**The measured pipeline must be the COMPLETE pipeline.** These tests originally called
+`pipeline.authorize` without an observation store and without a scorer, which meant Redis was
+never touched and ONNX Runtime was never invoked — `record_observation` came back at 0.000ms
+and `score_risk` at 0.002ms, and the gate passed with the two most expensive new stages
+absent. A number that does not measure what its label says is the same defect as a hardcoded
+one.
+
+So the real scorer and a real Redis store are required, the test SKIPS rather than measuring
+a degraded path when either is missing, and every run asserts `degraded_mode` came back empty.
 """
 
 from __future__ import annotations
@@ -98,6 +108,60 @@ def report(label: str, samples_ms: list[float]) -> str:
     )
 
 
+@pytest.fixture(scope="module")
+def scorer():
+    """The REAL model, or a skip. Never a fake.
+
+    A fixed-score double returns in microseconds and would make the risk stage's budget
+    unmeasurable. Skipping is the honest failure: the alternative is a green latency gate
+    over a pipeline that never ran inference.
+    """
+    from dwaar.risk import model as riskmodel
+
+    loaded = riskmodel.load()
+    if loaded is None:
+        pytest.skip(
+            "no model bundle in models/risk — the latency gate would measure a pipeline "
+            "with stage 4 short-circuited. Train one with `python -m tools.train_risk`."
+        )
+    return loaded
+
+
+@pytest.fixture
+async def observation_store():
+    """A REAL Redis store, or a skip. Same reasoning as `scorer`."""
+    from redis.asyncio import Redis
+
+    from dwaar.risk.observations import Observation, RedisObservationStore
+
+    client = Redis.from_url(REDIS_URL)
+    store = RedisObservationStore(client)
+    probe = await store.observe(
+        agent_id="latency-probe",
+        principal_id="latency-probe",
+        observation=Observation(0.0, 1, None, None, None, None),
+    )
+    if not probe.available:
+        await client.aclose()
+        pytest.skip(f"no Redis at {REDIS_URL} — stage 3 would not touch the network")
+    try:
+        yield store
+    finally:
+        await client.aclose()
+
+
+def assert_complete(outcome) -> None:
+    """The control that keeps every number in this file honest.
+
+    Without it a missing collaborator turns the measurement into a measurement of a
+    different, cheaper pipeline — and the gate goes green.
+    """
+    assert outcome.degraded_mode == [], (
+        f"the measured pipeline was DEGRADED ({outcome.degraded_mode}); this latency number "
+        "describes a pipeline with stages missing and must not be reported"
+    )
+
+
 @pytest.fixture
 async def bench_mandate(owner_dsn, make_mandate, signer):
     """A mandate with headroom for 1,000 requests, on its own merchant chain."""
@@ -131,7 +195,7 @@ async def bench_mandate(owner_dsn, make_mandate, signer):
 
 
 async def test_pipeline_p99_under_25ms(
-    app_dsn, bench_mandate, signer, settings, nonce_store, capsys
+    app_dsn, bench_mandate, signer, settings, nonce_store, scorer, observation_store, capsys
 ):
     """THE gate. 1,000 requests through the full pipeline including the chain write."""
     _merchant, mandate = bench_mandate
@@ -142,20 +206,24 @@ async def test_pipeline_p99_under_25ms(
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         # Warm the pool, the prepared statements and the chain tail before measuring.
         for request, headers, body in warmup:
-            await pipeline.authorize(
+            outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
                 headers=headers, body=body, nonce_store=nonce_store,
+                observation_store=observation_store, scorer=scorer,
             )
             await conn.commit()
+        assert_complete(outcome)
 
         for request, headers, body in prepared:
             started = time.perf_counter()
-            await pipeline.authorize(
+            outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
                 headers=headers, body=body, nonce_store=nonce_store,
+                observation_store=observation_store, scorer=scorer,
             )
             await conn.commit()
             samples.append((time.perf_counter() - started) * 1000)
+    assert_complete(outcome)
 
     line = report("pipeline", samples)
     with capsys.disabled():
@@ -169,7 +237,7 @@ async def test_pipeline_p99_under_25ms(
 
 
 async def test_no_single_stage_dominates(
-    app_dsn, bench_mandate, signer, settings, nonce_store, capsys
+    app_dsn, bench_mandate, signer, settings, nonce_store, scorer, observation_store, capsys
 ):
     """The stage split exists to make a regression attributable, so assert it stays so.
 
@@ -185,10 +253,12 @@ async def test_no_single_stage_dominates(
             outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
                 headers=headers, body=body, nonce_store=nonce_store,
+                observation_store=observation_store, scorer=scorer,
             )
             await conn.commit()
             for stage, micros in outcome.stage_timings_us.items():
                 per_stage.setdefault(stage, []).append(micros)
+    assert_complete(outcome)
 
     with capsys.disabled():
         print()

@@ -79,10 +79,24 @@ NAMESPACE: frozenset[str] = frozenset(
         "risk.score",
         "risk.injection_flag",
         "agent.verified",
+        # Every behavioural feature the model consumes is also referenceable by a rule, and
+        # the two lists are kept in step by `tests/policy/test_engine.py`. A feature the
+        # model can use but a merchant cannot write a rule about would be a capability the
+        # deterministic layer is denied for no reason — and the deterministic layer is the
+        # one whose decisions can be defended in a dispute.
         "features.velocity_1m",
         "features.velocity_1h",
         "features.distinct_skus_1h",
         "features.burst_index",
+        "features.cadence_entropy",
+        "features.inter_arrival_variance",
+        "features.amount_entropy",
+        "features.bin_diversity",
+        "features.failure_ratio",
+        "features.category_drift",
+        "features.cart_mutation_rate",
+        "features.price_probe_score",
+        "features.session_duration_s",
     }
 )
 

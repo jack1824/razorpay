@@ -94,11 +94,25 @@ async def health(request: Request) -> dict:
     components["signature_verification"] = _report("signature_verification", True, None, now)
     components["policy_engine"] = _report("policy_engine", True, None, now)
 
+    # The risk model reports what actually happened at startup, not what is in the
+    # repository. `app.state.scorer` is None when no bundle loaded, which is a degraded
+    # state the fail matrix calls fail-open — the service runs and the ledger still holds.
+    scorer = getattr(app.state, "scorer", None)
+    components["risk_model"] = _report(
+        "risk_model",
+        scorer is not None,
+        None if scorer is not None else "no model bundle loaded",
+        now,
+    )
+    if scorer is not None:
+        components["risk_model"]["model_version"] = scorer.model_version
+
     # Not built yet. Reported as down with their real fail modes, so the console shows the
-    # truth rather than an empty space that reads as healthy.
-    for pending in ("risk_model", "injection_detector"):
+    # truth rather than an empty space that reads as healthy. `injection_detector` being
+    # down is also the only public statement that `injection_flag = false` on a record
+    # currently means "nothing checked" rather than "checked and clean".
+    for pending in ("injection_detector", "explainer"):
         components[pending] = _report(pending, False, "not implemented", now)
-    components["explainer"] = _report("explainer", False, "not implemented", now)
 
     status = overall([Severity(component["severity"]) for component in components.values()])
 

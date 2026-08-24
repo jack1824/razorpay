@@ -29,6 +29,18 @@ class AuthorizeRequest:
     sku: str | None = None
     free_text: Mapping[str, str] = field(default_factory=dict)
 
+    # Behavioural context. Optional because a caller that omits them still gets a decision —
+    # the corresponding features simply carry no signal — and because requiring a card BIN
+    # to authorise a payout would be nonsense.
+    #
+    # Neither is ever stored raw. `dwaar/risk/observations.py` hashes both before they enter
+    # the rolling window, and nothing downstream of that sees the values: BIN *diversity* and
+    # cart *mutation* are the signals, and counting distinct things does not require knowing
+    # what they are. A raw BIN reaching `decision_records.features` would be unrecoverable,
+    # because that table cannot be purged.
+    instrument_bin: str | None = None
+    cart_id: str | None = None
+
 
 @dataclass(frozen=True)
 class StageResult:
@@ -83,6 +95,21 @@ class RiskResult(StageResult):
     risk_score: float | None = None
     model_version: str | None = None
     injection_flag: bool = False
+
+    # The two components, kept apart all the way to the log line. A supervised classifier
+    # trained on four archetypes cannot recognise a fifth; an isolation forest fit on
+    # legitimate traffic alone can. Which of them fired is the interesting result on
+    # evaluation day, including the outcome where the supervised half does nothing, and a
+    # combined number alone cannot answer it.
+    #
+    # They are NOT stored as columns. `decision_records` keeps the feature vector, so both
+    # components are recoverable by replaying a stored row against the named model version —
+    # which is a stronger property than storing them would be, because a replay can be
+    # checked and a stored number can only be believed.
+    supervised_score: float | None = None
+    anomaly_score: float | None = None
+    band: str | None = None
+    top_features: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)

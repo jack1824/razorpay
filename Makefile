@@ -12,7 +12,13 @@ export DATABASE_URL_MIGRATE ?= postgresql://dwaar_owner:owner_pw@localhost:5432/
 export DATABASE_URL_APP     ?= postgresql://dwaar_app:app_pw@localhost:5432/dwaar
 export DATABASE_URL_SUPERUSER ?= postgresql://postgres:postgres_pw@localhost:5432/dwaar
 
-.PHONY: help up down logs migrate bootstrap-local seed test test-db lint fmt verify eval demo clean
+# One integer reproduces the whole zoo: identities, request streams, and the split the
+# trainer uses. Overridable so a second run can be generated without colliding with the
+# first's agents.
+TRAFFIC_SEED ?= 20260828
+
+.PHONY: help up down logs migrate bootstrap-local seed traffic train test test-db lint fmt \
+        verify eval demo clean
 
 help:
 	@echo "Dwaar — authorization layer for AI agents that spend money"
@@ -22,6 +28,8 @@ help:
 	@echo "  make logs      tail api logs"
 	@echo "  make migrate   apply migrations as the owner role"
 	@echo "  make seed      regenerate data/seed/ + .keys/ (deterministic)"
+	@echo "  make traffic   run the agent zoo against a LOCAL gateway (needs it running)"
+	@echo "  make train     train the risk model from decision_records + the run manifest"
 	@echo "  make test      run the full test suite"
 	@echo "  make lint      ruff check"
 	@echo "  make fmt       ruff format"
@@ -65,6 +73,20 @@ bootstrap-local:
 seed:
 	$(PY) -m tools.gen_seed --out data/seed --seed 20260905
 
+# Real signed HTTP against a running local instance. NOT a fixture replay: the gateway
+# computes its own features from its own rolling windows, so the training distribution is
+# the serving distribution. Start the API first.
+#
+# Localhost only, enforced in zoo/base.py rather than here.
+traffic:
+	$(PY) -m zoo.run --legit 30 --card-tester 4 --budget-breacher 4 --injector 4 \
+	  --requests 40 --seed $(TRAFFIC_SEED)
+
+# Reads features from decision_records and labels from the run manifest — the two are never
+# in one process. Refuses to write a bundle if any single feature separates the archetypes.
+train:
+	$(PY) -m tools.train_risk --seed $(TRAFFIC_SEED)
+
 test:
 	$(PY) -m pytest -q
 
@@ -72,10 +94,10 @@ test-db:
 	$(PY) -m pytest -q -m db
 
 lint:
-	$(PY) -m ruff check dwaar tests scripts
+	$(PY) -m ruff check dwaar tests scripts zoo tools
 
 fmt:
-	$(PY) -m ruff format dwaar tests scripts
+	$(PY) -m ruff format dwaar tests scripts zoo tools
 
 clean:
 	$(COMPOSE) down -v

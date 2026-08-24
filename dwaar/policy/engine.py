@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from dwaar.policy.dsl import Rule, Ruleset
+from dwaar.risk import features as _risk_features
 
 _MISSING = object()
 
@@ -53,6 +54,11 @@ class Verdict:
 NO_MATCH = Verdict(action="allow", rule_id=None, reason_code="allowed")
 
 
+#: Imported rather than restated. `dwaar.risk.features` is pure — no Redis, no ONNX, no
+#: numpy — so this costs the policy engine nothing on the request path.
+_FEATURE_NAMES = _risk_features.FEATURE_NAMES
+
+
 def build_namespace(
     *,
     request: Any,
@@ -70,6 +76,7 @@ def build_namespace(
     from inside what is supposed to be a pure comparison.
     """
     features = features or {}
+    natural = _risk_features.to_natural(features)
     mandate = mandate or {}
     return {
         "request.amount_paise": getattr(request, "amount_paise", None),
@@ -85,10 +92,15 @@ def build_namespace(
         "risk.score": risk_score,
         "risk.injection_flag": injection_flag,
         "agent.verified": agent_verified,
-        "features.velocity_1m": features.get("velocity_1m"),
-        "features.velocity_1h": features.get("velocity_1h"),
-        "features.distinct_skus_1h": features.get("distinct_skus_1h"),
-        "features.burst_index": features.get("burst_index"),
+        # Built from the same list the model consumes, so a feature can never be present
+        # for the model and absent for the policy engine. A missing key resolves to None,
+        # which every comparison treats as FALSE — an absent feature can never *cause* an
+        # allow.
+        #
+        # Converted to natural units first. Features are stored as scaled integers because a
+        # signed payload cannot contain a float; a merchant writing a rule must never have
+        # to know that, so the scale is undone exactly once, here.
+        **{f"features.{name}": natural.get(name) for name in _FEATURE_NAMES},
     }
 
 

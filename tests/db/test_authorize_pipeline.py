@@ -104,18 +104,71 @@ async def test_every_stage_is_timed(app_dsn, scenario, authorize_signed
     assert all(v >= 0 for v in outcome.stage_timings_us.values())
 
 
-async def test_every_stub_declares_itself_on_the_record(app_dsn, scenario, authorize_signed
+async def test_a_normal_request_carries_an_empty_degraded_mode(
+    app_dsn, scenario, authorize_signed
 ):
-    """Phase 3 records must be self-labelling. A stub that does not appear in
-    degraded_mode is a stub that can be demoed as working."""
+    """The 27 August milestone: the pipeline is no longer a scaffold.
+
+    Every stage is real. Every remaining degradation token names a RUNTIME condition —
+    Redis unreachable, a model bundle that would not load — so an empty `degraded_mode` on a
+    healthy request is now a meaningful statement rather than the absence of a feature that
+    was never built.
+
+    Asserted against `STUB_STAGES` rather than against a literal empty list, so the day a
+    stub is legitimately reintroduced this test fails loudly instead of being silently
+    correct about the wrong thing.
+    """
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await run(conn, make_request(scenario["mandate"]), authorize_signed)
         record = await decision_records.get(conn, outcome.record_id)
 
-    assert set(record["degraded_mode"]) == set(pipeline.STUB_STAGES.values())
+    assert set(record["degraded_mode"]) == set(pipeline.STUB_STAGES.values()) == set(), (
+        f"a healthy request carried {record['degraded_mode']}. Every stage is real as of "
+        "27 August; a token here means a live degradation, not an unbuilt component."
+    )
     assert record["degraded_mode"] == sorted(record["degraded_mode"]), (
         "degraded_mode is inside the signed payload, so its order is part of the hash"
     )
+    # `replay_lookup` is timed but never appended to `stages_executed`: it is a lookup that
+    # decides whether to do the work, not a step of the work. Everything else must be there.
+    assert set(record["stages_executed"]) == set(pipeline.STAGE_ORDER) - {
+        pipeline.REPLAY_STAGE
+    }, "a permitted request must run every stage"
+    assert record["risk_score"] is not None, (
+        "a permitted request must be scored; a NULL here would make the NULL on a gate "
+        "denial mean nothing"
+    )
+
+
+async def test_the_real_model_bundle_scores_a_live_request(
+    app_dsn, scenario, authorize_signed
+):
+    """The same claim, against the model that actually ships.
+
+    The test above injects a fixed scorer, which proves the pipeline has no stubs but says
+    nothing about the artifact in `models/risk/`. This loads that artifact and puts a real
+    request through it — the check that the committed bundle matches the committed feature
+    ordering, which is the failure that produces confident nonsense rather than an error.
+    """
+    from dwaar.risk import model as riskmodel
+
+    scorer = riskmodel.load()
+    if scorer is None:
+        pytest.skip(
+            "no model bundle in models/risk. Generate traffic with `python -m zoo.run` "
+            "and train with `python -m tools.train_risk`."
+        )
+
+    async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
+        outcome = await run(
+            conn, make_request(scenario["mandate"]), authorize_signed, scorer=scorer
+        )
+        record = await decision_records.get(conn, outcome.record_id)
+
+    assert record["degraded_mode"] == []
+    assert record["risk_score"] is not None
+    assert 0.0 <= float(record["risk_score"]) <= 1.0
+    assert record["model_version"] == scorer.model_version
 
 
 # ── DEMO BEAT 2, as a CI gate ───────────────────────────────────────────────────────

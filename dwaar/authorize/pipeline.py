@@ -2,18 +2,35 @@
 
 Stage order and what each one may do:
 
-    1  verify_signature   STUB  fail-closed     identity
+    1  verify_signature   REAL  fail-closed     identity
     2  resolve_mandate    REAL  fail-closed     authority
+   2.2 record_observation REAL  degrade         the rolling window — see below
    2.5 check_authority    REAL  pure, no I/O    authority — short-circuits 3-6
-    3  compute_features   STUB  degrade         judgment
-    4  score_risk         STUB  fail-open       judgment
-    5  evaluate_policy    STUB  last-signed     deterministic rules
+    3  compute_features   REAL  degrade         judgment
+    4  score_risk         REAL  fail-open       judgment
+    5  evaluate_policy    REAL  last-signed     deterministic rules
     6  reserve_budget     REAL  fail-closed     authority (cumulative cap)
     7  render_decision    REAL  pure            the answer
     8  write_decision_record REAL fail-closed   the evidence
 
 Stages 6 and 8 share one transaction. Lock order is always mandate row → chain advisory,
 never the reverse.
+
+── Why the observation is recorded BEFORE the gate ─────────────────────────────────────
+
+The gate short-circuits stages 3-6 on a per-transaction breach, which is what makes
+`risk_score IS NULL` on such a record a structural property. If the rolling window were only
+written by stage 3, it would then contain **only requests the gate permitted** — every
+feature would be conditioned on the gate's own decision, and a budget breacher whose
+requests all die at the gate would look like a quiet agent with almost no history.
+
+So the window is written between the replay check and the gate. Every attempt is observed;
+only permitted attempts are scored. It costs one Redis round trip on the deny path and it is
+what lets `dwaar/risk/features.py` claim its vector is a function of behaviour rather than of
+authority.
+
+Replays are not observed: `_replayed` returns before this point, because a retried webhook is
+one attempt that was delivered twice, not two attempts.
 """
 
 from __future__ import annotations
@@ -44,6 +61,12 @@ from dwaar.logging import get_logger
 from dwaar.metrics import authorize_duration, decisions_total, stage_duration
 from dwaar.nonce import NonceStore
 from dwaar.policy.store import PolicyStore
+from dwaar.risk import observations as obsmod
+from dwaar.risk.observations import (
+    InMemoryObservationStore,
+    RedisObservationStore,
+    WindowSnapshot,
+)
 
 log = get_logger("dwaar.authorize")
 
@@ -51,9 +74,16 @@ log = get_logger("dwaar.authorize")
 # so it is named separately and still timed.
 REPLAY_STAGE = "replay_lookup"
 
+#: Also not a stage in the ARCHITECTURE table. It writes the rolling window that stage 3
+#: reads, and it runs before the gate so the window is not conditioned on the gate's own
+#: decision. Named and timed like everything else.
+OBSERVE_STAGE = "record_observation"
+
 # Process-wide fallback so a caller that does not manage one still gets caching rather
 # than a database round trip per request. The API supplies its own via app.state.
 _DEFAULT_POLICY_STORE = PolicyStore()
+
+ObservationStore = RedisObservationStore | InMemoryObservationStore
 
 # The stage names, in order. `tests/test_stub_contracts.py` enumerates this rather than a
 # hand-written list, so a stage added without a degradation token cannot slip through.
@@ -61,6 +91,7 @@ STAGE_ORDER: tuple[str, ...] = (
     signature_stage.STAGE_NAME,
     mandate_stage.STAGE_NAME,
     REPLAY_STAGE,
+    OBSERVE_STAGE,
     authority_stage.STAGE_NAME,
     features_stage.STAGE_NAME,
     risk_stage.STAGE_NAME,
@@ -70,12 +101,15 @@ STAGE_ORDER: tuple[str, ...] = (
     record_stage.STAGE_NAME,
 )
 
-# Stage 1 became real on 25 Aug and stage 5 on 26 Aug, so `signature_unverified` and
-# `policy_stubbed` no longer appear on any record.
-STUB_STAGES: dict[str, str] = {
-    features_stage.STAGE_NAME: features_stage.DEGRADED_TOKEN,
-    risk_stage.STAGE_NAME: risk_stage.DEGRADED_TOKEN,
-}
+# EMPTY, as of 27 August. Stage 1 became real on the 25th, stage 5 on the 26th, and stages
+# 3 and 4 on the 27th — so no record carries a token meaning "this component does not exist".
+#
+# Every remaining token in `degraded_mode` now names a RUNTIME condition: Redis unreachable,
+# a model bundle that would not load. `tests/test_stub_contracts.py` enumerates this dict
+# rather than a hand-written list, so a stub reintroduced without a token cannot slip
+# through, and `tests/db/test_authorize_pipeline.py` asserts a normal request carries an
+# empty `degraded_mode` — the milestone that says the pipeline is no longer a scaffold.
+STUB_STAGES: dict[str, str] = {}
 
 
 class Unauthenticated(Exception):
@@ -170,6 +204,8 @@ async def authorize(
     path: str = "/v1/authorize",
     nonce_store: NonceStore | None = None,
     policy_store: PolicyStore | None = None,
+    observation_store: ObservationStore | None = None,
+    scorer: risk_stage.ScorerLike | None = None,
     now: datetime | None = None,
 ) -> PipelineOutcome:
     """Run the pipeline. The caller owns the transaction and commits on success."""
@@ -226,6 +262,13 @@ async def authorize(
 
     features = risk = policy = ledger = None
 
+    # ── 2.2 observe. Before the gate, deliberately — see the module docstring. ───────
+    window = await timer.run(
+        OBSERVE_STAGE,
+        _observe(observation_store, request, mandate.principal_id, now),
+    )
+    executed.append(OBSERVE_STAGE)
+
     if mandate.ok:
         # ── 2.5 arithmetic gate. Pure, no I/O. ──────────────────────────────────────
         gate = timer.sync(
@@ -239,16 +282,25 @@ async def authorize(
 
         if gate.permitted:
             # ── 3-5 judgment ────────────────────────────────────────────────────────
-            features = await timer.run(
+            # No mandate parameter, and that is the enforcement rather than the style:
+            # a feature that cannot see an authority limit cannot encode one.
+            features = timer.sync(
                 features_stage.STAGE_NAME,
-                features_stage.compute_features(request, mandate.mandate),
+                features_stage.compute_features_from_window,
+                request,
+                window,
+                now.timestamp(),
             )
             executed.append(features_stage.STAGE_NAME)
             if features.degraded:
                 degraded.append(features.degraded)
 
+            # The scorer sees the feature vector and nothing else — not the request, not
+            # the mandate, not a connection. So a stored row can be replayed against the
+            # named model version and produce the same number.
             risk = await timer.run(
-                risk_stage.STAGE_NAME, risk_stage.score_risk(request, features.features)
+                risk_stage.STAGE_NAME,
+                risk_stage.score_risk(features.features, scorer=scorer),
             )
             executed.append(risk_stage.STAGE_NAME)
             if risk.degraded:
@@ -357,6 +409,11 @@ async def authorize(
         reason_code=decision.reason_code,
         rule_fired=decision.rule_fired,
         risk_score=risk.risk_score if risk else None,
+        risk_band=risk.band if risk else None,
+        supervised_score=risk.supervised_score if risk else None,
+        anomaly_score=risk.anomaly_score if risk else None,
+        model_version=risk.model_version if risk else None,
+        top_features=[name for name, _ in (risk.top_features if risk else ())],
         chain_seq=written.seq,
         latency_us=total_us,
         stage_timings_us=timer.timings,
@@ -364,6 +421,27 @@ async def authorize(
         stages_executed=executed,
     )
     return outcome
+
+
+async def _observe(
+    store: ObservationStore | None,
+    request: AuthorizeRequest,
+    principal_id: str | None,
+    now: datetime,
+) -> WindowSnapshot:
+    """Read the rolling window and append this attempt to it, in one round trip.
+
+    Returns the EMPTY snapshot when there is no store or no resolved principal. Empty is
+    distinguishable from "no history" — `WindowSnapshot.available` is False — so stage 3 can
+    tell a degradation from a first-time agent rather than reporting one as the other.
+    """
+    if store is None or principal_id is None:
+        return obsmod.EMPTY
+    return await store.observe(
+        agent_id=request.agent_id,
+        principal_id=principal_id,
+        observation=obsmod.observation_from_request(request, now=now.timestamp()),
+    )
 
 
 __all__ = [

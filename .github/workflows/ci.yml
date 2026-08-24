@@ -45,7 +45,7 @@ jobs:
       - name: Create roles (mirrors scripts/init-db/01-roles.sh)
         run: ./scripts/init-db/local-bootstrap.sh postgres dwaar
 
-      - run: python -m ruff check dwaar tests scripts
+      - run: python -m ruff check dwaar tests scripts zoo tools
 
       # The DB suite must NOT be allowed to skip in CI. A skipped append-only test is
       # indistinguishable from an absent control, and that is the whole point of the repo.

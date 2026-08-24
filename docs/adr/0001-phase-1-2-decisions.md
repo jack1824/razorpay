@@ -374,3 +374,88 @@ whoever built it. One helper plus a registry, with a test asserting the registry
 complete, is the layer at which a fourth instance cannot happen quietly.
 
 When a defect log shows the same shape twice, stop fixing instances.
+
+---
+
+## Phase 6 decisions — 27 August
+
+Recorded here for the same reason as everything above: they contradict or extend the
+package, and a decision nobody wrote down is a decision the next person re-argues.
+
+### The schedule was wrong and was swapped
+
+The build plan put the risk model on day 7 and the agent zoo on day 8. **You cannot train a
+model on traffic that does not exist yet.** Features, the four non-held-out agents and the
+model now land together; the two held-out archetypes, the injection detector and calibration
+move to 28 August. The held-out isolation is unaffected — only `compromised` and `sleeper`
+need the separate session, and they stay there.
+
+### The feature layer cannot see a mandate — by signature, not by discipline
+
+`compute()` has no mandate parameter, no connection, and no Redis client. Nothing it imports
+can reach `dwaar.db`, the authority stage or the policy package. This is the same pattern as
+non-ownership on `decision_records`: *chooses not to read* is a promise, *cannot receive* is
+a property.
+
+The rolling window is written at step 2.2, **before** the arithmetic gate. If stage 3 wrote
+it, the window would contain only gate-permitted requests, every feature would be conditioned
+on the gate's own decision, and a budget breacher whose requests mostly die at the gate would
+look like a quiet agent. The ordering is asserted by a test that varies the mandate across
+the gate boundary and requires the feature vector not to move.
+
+### Features are integers, because a signed payload cannot hold a float
+
+`dwaar/crypto/jcs.py` refuses floats outright — RFC 8785 float serialisation depends on the
+number-to-string algorithm, so a verifier in another language could canonicalise the same
+record to different bytes. The first float feature hit that wall at stage 8.
+
+Features are therefore quantised once, at computation, to integers in micro-units. It buys
+more than canonicalisation: the number the model scored and the number the record stores are
+the *same* integer, so replaying a stored row against the named model version reproduces the
+score exactly rather than approximately. `to_natural()` undoes the scale for rule authors, in
+exactly one place, so a merchant writes `features.velocity_1m > 10` and never sees it.
+
+### Two models, and the combiner is deliberately blunt
+
+A supervised classifier trained on four archetypes has no reason to recognise a fifth, so the
+held-out numbers would have been poor for a structural reason rather than a real one. Binary
+rather than six-class, because six-class learns *which of my generators made this*. Beside it
+an isolation forest fit on legitimate traffic only, which scores distance from normal rather
+than similarity to known-bad.
+
+`risk_score = max(supervised, anomaly)`. A weighted blend would dilute the anomaly signal
+exactly when it matters most — an unseen archetype scores high on one and low on the other,
+and the average lands in no band. `max` also means every score is attributable to a named
+component, with no weight tuned on data we generated. The cost is false positives, which is
+why the generator's ~3% legitimate overlap is not optional.
+
+### Risk bands are a policy, not a branch in the pipeline
+
+`if risk_score > 0.8: deny` is four lines and it would put authority logic in a second place,
+produce a denial with no `rule_fired` a merchant could be shown, and create a decision path
+the policy engine does not know about. Instead the bands are a baseline ruleset in the same
+DSL, evaluated by the same engine, composed with a merchant's policy by taking the **more
+restrictive** verdict rather than by concatenation — concatenation would make the order two
+authors happened to write their rules in into an authority decision.
+
+### Training lives outside `dwaar/`
+
+The trainer must read evaluation labels; the service must never be able to. `tools/train_risk.py`
+reads feature vectors from `decision_records` and labels from the zoo's run manifest, and the
+two are never in one process. Putting it outside the package makes *the service cannot see
+labels* a fact about the package boundary rather than a claim about discipline — and it keeps
+LightGBM, scikit-learn and the ONNX converters off the request path, asserted by the same
+import walk that enforces the no-LLM rule.
+
+### 3. A control that forbids a term attracts prose containing that term
+
+Three source-scanning checks independently matched their own documentation: the pgcrypto
+check matched migration 0001's comment saying pgcrypto is unused, and the `BaseHTTPMiddleware`
+check matched the docstring explaining why the class is banned. A third was one docstring away
+from the same thing.
+
+The failure is structural. The absence has to be justified somewhere, and the natural place to
+justify it is the file being scanned. Per the rule above, the fix belongs at the layer where a
+fourth instance is impossible: `tests/_support/sourcescan.py` strips comments and docstrings —
+and deliberately **not** other string literals, because `open("ground_truth.json")` is a leak
+that lives inside one — and all four checks route through it.

@@ -15,13 +15,14 @@ flowchart LR
     S1["1 · signature<br/>RFC 9421 · fail-closed"]:::done
     S2["2 · mandate<br/>verify · fail-closed"]:::done
     G["2.5 · AUTHORITY GATE<br/>pure arithmetic · no I/O"]:::done
-    S3["3 · features<br/>Redis · degrade"]:::soon
-    S4["4 · risk + injection<br/>LightGBM · fail-OPEN"]:::soon
+    S3["3 · features<br/>Redis windows · degrade"]:::done
+    S4["4 · risk<br/>LightGBM + iForest · fail-OPEN"]:::done
     S5["5 · policy<br/>compiled rules"]:::done
     S6["6 · budget reserve<br/>ARITHMETIC · fail-closed"]:::done
     S7["7 · decision<br/>pure function"]:::done
     S8["8 · hash + chain + SIGN"]:::done
-    S1 --> S2 --> G --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
+    S1 --> S2 --> OB["2.2 · observe<br/>window written BEFORE the gate"]:::done
+    OB --> G --> S3 --> S4 --> S5 --> S6 --> S7 --> S8
     G -.->|"cap · category · expiry<br/>short-circuit, risk_score NULL"| S7
   end
 
@@ -32,13 +33,18 @@ flowchart LR
   GW -. async, off-path .-> EX[LLM explainer]:::soon
   PC[LLM policy compiler<br/>Gemini · OFFLINE · human-gated]:::done -->|signed ruleset| S5
   CON[console]:::done -. SSE .-> GW
+  ZOO[agent zoo<br/>real signed HTTP · localhost only]:::ext -->|traffic| GW
+  CH -->|features| TR[offline trainer<br/>labels never enter dwaar/]:::done
+  TR -->|ONNX bundle| S4
 
   classDef done fill:#1a4d2e,stroke:#2d7a4a,color:#fff
   classDef soon fill:#2b2b2b,stroke:#555,color:#bbb
   classDef ext  fill:#1a3a5c,stroke:#2d6a9f,color:#fff
 ```
 
-<sub>Green = built (phases 1–3). Grey = scheduled.</sub>
+<sub>Green = built. Grey = scheduled. Every stage is real as of 27 August: a healthy
+request now carries an <strong>empty</strong> <code>degraded_mode</code>, and every token that
+can still appear names a runtime condition rather than an unbuilt component.</sub>
 
 ---
 
@@ -123,11 +129,14 @@ verifier, a deterministic policy engine with an offline LLM compiler, and a live
 | Budget ledger — atomic, idempotent, 50-writer clean | ✅ |
 | Per-merchant hash chain with explicit `seq` allocation | ✅ |
 | Import isolation + hot-path purity + ground-truth isolation tests | ✅ |
+| Behavioural features — Redis windows keyed on (agent, principal) | ✅ |
+| Risk model — LightGBM + isolation forest, ONNX, pre-warmed | ✅ |
+| Agent zoo — four archetypes, real signed HTTP, localhost only | ✅ |
+| Every stage real: `degraded_mode` empty on a healthy request | ✅ |
 
 | Scheduled | Date |
 |---|---|
-| Features + risk model | 27 Aug |
-| Agent zoo (4 agents; 2 held out, separate session) | 28 Aug |
+| Held-out archetypes (separate session), injection detector, calibration | 28 Aug |
 | Razorpay test mode + MCP proxy | 29 Aug |
 | Async explainer, `make demo`, remaining console panels | 30 Aug |
 | `make eval` + fraud baseline + first held-out run | 31 Aug |
@@ -196,8 +205,16 @@ Both are arithmetic. They sit at different points because one needs only the man
 other needs the ledger.
 
 `tests/db/test_authorize_pipeline.py` asserts this three ways — the NULL, the absent ledger
-entry, and a spy proving `score_risk` is *never invoked*. Only the third cannot pass
-vacuously today, and only the third will fail loudly on 27 Aug if the ordering regresses.
+entry, and a spy proving `score_risk` is *never invoked*. The first two could pass vacuously
+while stage 4 was a stub returning `None`; the spy could not, and as of 27 August it runs
+against a model that genuinely scores. Its first non-vacuous run confirmed the ordering.
+
+A fourth property was added with the model: **the feature layer cannot see a mandate.**
+`compute()` has no parameter for one, nothing it imports can reach the database, and a test
+holds a request stream fixed while varying the mandate's caps across the gate boundary and
+asserts the feature vector does not move. A feature that could restate the cap would let the
+model learn to predict the gate — good metrics, meaningless importances, and a claim about
+the deterministic/probabilistic split that stops being true.
 
 ### 4. The budget ledger's lock target, and the tripwire beside it
 

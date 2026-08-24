@@ -45,6 +45,13 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         # decisions and measurements
         "decision", "reason_code", "rule_fired", "risk_score", "injection_flag",
         "latency_us", "degraded_mode", "policy_version", "chain_seq",
+        # model outputs. Each is a number or a short label ABOUT the request, never a
+        # value FROM it — `top_features` carries feature NAMES, not their values, which
+        # is why it is here and `free_text` can never be.
+        "model_version", "risk_band", "supervised_score", "anomaly_score", "top_features",
+        # per-stage timings. The reason a p99 regression can be attributed to a stage
+        # instead of guessed at, which is worth a wide log line.
+        "stage_timings_us", "stages_executed", "warm_ms",
         # Behavioural feature VALUES — velocity, burst index, and similar aggregates.
         # Allowed because they are already in the signed decision record and are what
         # makes a decision explainable after the fact. Nested keys are still filtered:
@@ -52,7 +59,7 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         "features",
         # operational
         "migration", "version", "applied", "component", "role", "count", "attempt",
-        "table", "duration_s", "ok", "error_type",
+        "table", "duration_s", "ok", "error_type", "loaded", "directory",
     }
 )
 

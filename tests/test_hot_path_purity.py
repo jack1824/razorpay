@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests._support import sourcescan
 from tests._support.importgraph import REPO_ROOT, build_graph, find_path_to
 from tests._support.llm_blocklist import BLOCKED_MODULES, PROVIDER_HOSTS
 
@@ -169,17 +170,43 @@ def test_no_provider_host_appears_in_request_path_source():
     A raw `httpx.post("https://generativelanguage.googleapis.com/...")` involves no import
     and produces no edge in the graph. This is a source scan, which is blunt and cheap, and
     it closes the one gap the static analysis has.
+
+    It goes through the shared stripper for the same reason the other three do: this file
+    would otherwise be unable to name the host in the docstring that explains what it is
+    looking for. It was one docstring away from being the fourth instance of that bug.
     """
-    violations = []
-    for package in ("dwaar/api", "dwaar/authorize"):
-        for path in sorted((REPO_ROOT / package).rglob("*.py")):
-            text = path.read_text(encoding="utf-8")
-            for host in PROVIDER_HOSTS:
-                if host in text:
-                    violations.append(f"  {path.relative_to(REPO_ROOT)} mentions {host}")
-    assert not violations, (
+    result = sourcescan.scan(
+        [REPO_ROOT / "dwaar" / "api", REPO_ROOT / "dwaar" / "authorize"],
+        PROVIDER_HOSTS,
+        relative_to=REPO_ROOT,
+    )
+    assert result.files_scanned >= 8, (
+        f"only {result.files_scanned} request-path sources scanned; a scanner with nothing "
+        "to scan passes vacuously"
+    )
+    assert not result.findings, (
         "a provider endpoint appears in request-path source; the import walker cannot see "
-        "a raw HTTP call:\n" + "\n".join(violations)
+        "a raw HTTP call:\n" + sourcescan.render(result.findings)
+    )
+
+
+def test_the_provider_host_scan_would_catch_a_raw_call(tmp_path):
+    """Positive control. Every host in the list must be matchable.
+
+    A host added to the list but not actually detectable would look enforced and not be —
+    the same shape as F-014.
+    """
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    for index, host in enumerate(PROVIDER_HOSTS):
+        (probe / f"raw{index}.py").write_text(
+            f'import httpx\nhttpx.post("https://{host}/v1/generate")\n', encoding="utf-8"
+        )
+    result = sourcescan.scan([probe], PROVIDER_HOSTS)
+    assert result.files_scanned == len(PROVIDER_HOSTS)
+    assert len({f.path for f in result.findings}) == len(PROVIDER_HOSTS), (
+        "not every provider host in the blocklist is detectable by the source scan; the "
+        "undetectable ones are decorative"
     )
 
 
