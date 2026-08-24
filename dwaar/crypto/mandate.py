@@ -16,6 +16,7 @@ Pinned by a golden vector in ``tests/crypto/test_mandate_vector.py``.
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime
 from typing import Any
 
 from dwaar.crypto.jcs import canonicalize, canonicalize_bytes
@@ -52,7 +53,14 @@ def build_payload(**fields: Any) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     for name in SIGNED_FIELDS:
         if name in fields and fields[name] is not None:
-            payload[name] = fields[name]
+            value = fields[name]
+            if isinstance(value, datetime):
+                # Always UTC. PostgreSQL returns TIMESTAMPTZ in the session timezone, so a
+                # verifier connecting with a different TimeZone setting would otherwise
+                # rebuild different bytes and report a valid mandate as tampered. The
+                # verifier caught exactly that on its first run.
+                value = value.astimezone(UTC).isoformat()
+            payload[name] = value
         elif name in DEFAULTS:
             payload[name] = DEFAULTS[name]
         else:

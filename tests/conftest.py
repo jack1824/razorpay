@@ -28,6 +28,10 @@ APP_DSN = os.environ.get(
 SUPERUSER_DSN = os.environ.get(
     "DATABASE_URL_SUPERUSER", "postgresql://postgres:postgres_pw@localhost:5432/dwaar"
 )
+# `.env` carries Docker service hostnames. Any test that builds a real app must override
+# them or the app fails closed on an unreachable Redis — which is correct behaviour, and
+# an unhelpful test failure.
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 
 def _reachable(dsn: str) -> bool:
@@ -113,6 +117,7 @@ def settings() -> Settings:
         DATABASE_URL_MIGRATE=MIGRATE_DSN,
         DATABASE_URL_APP=APP_DSN,
         DATABASE_URL_SUPERUSER=SUPERUSER_DSN,
+        REDIS_URL=REDIS_URL,
     )
 
 
@@ -140,16 +145,29 @@ def rand_hash() -> bytes:
     return os.urandom(32)
 
 
+AGENT_SEED = 20260905
+
+
 @pytest.fixture
 def make_agent():
+    """Registers the PUBLIC half of a key the test suite can actually sign with.
+
+    Random bytes would make every agent unable to authenticate, so signature tests would
+    have to build their own agents — and the rest of the suite would quietly stop
+    exercising the authenticated path.
+    """
+
     async def _make(conn, *, merchant_id: str = "mch_test0001", agent_id: str | None = None):
+        from dwaar.crypto import keys as keymod
         from dwaar.db.repositories import agents
 
+        aid = agent_id or rand_id("agt")
+        private = keymod.derive_private_key(AGENT_SEED, "agent", aid)
         return await agents.create(
             conn,
-            agent_id=agent_id or rand_id("agt"),
+            agent_id=aid,
             display_name="test-agent",
-            public_key=rand_key(),
+            public_key=keymod.public_bytes(private),
             registered_by=merchant_id,
         )
 
@@ -158,14 +176,19 @@ def make_agent():
 
 @pytest.fixture
 def make_principal():
+    """Derived key, like agents — so mandates can be genuinely signed by their principal."""
+
     async def _make(conn, *, merchant_id: str = "mch_test0001"):
+        from dwaar.crypto import keys as keymod
         from dwaar.db.repositories import principals
 
+        pid = rand_id("prn")
+        private = keymod.derive_private_key(AGENT_SEED, "principal", pid)
         return await principals.create(
             conn,
-            principal_id=rand_id("prn"),
+            principal_id=pid,
             merchant_id=merchant_id,
-            public_key=rand_key(),
+            public_key=keymod.public_bytes(private),
         )
 
     return _make
@@ -191,28 +214,97 @@ def make_mandate(make_agent, make_principal):
         if max_per_txn_paise is None:
             max_per_txn_paise = min(500_000, max_total_paise)
 
+        from dwaar.crypto import keys as keymod
+        from dwaar.crypto import mandate as mandatemod
         from dwaar.db.repositories import mandates
 
         agent = await make_agent(conn, merchant_id=merchant_id)
         principal = await make_principal(conn, merchant_id=merchant_id)
-        return await mandates.create(
-            conn,
-            mandate_id=rand_id("mnd"),
+
+        # A GENUINELY signed mandate, not a placeholder.
+        #
+        # An earlier version wrote canonical_json='{"test":true}' with a random hash. The
+        # verifier caught it immediately — correctly, because such a row is exactly the
+        # shape of a tampered mandate: columns that disagree with the bytes that were
+        # signed. Fixtures that a verifier would reject are fixtures that cannot be used to
+        # test a verifier.
+        mandate_id = rand_id("mnd")
+        expires_at = datetime.now(UTC) + timedelta(days=30)
+        payload = mandatemod.build_payload(
+            mandate_id=mandate_id,
             principal_id=principal["principal_id"],
             agent_id=agent["agent_id"],
             max_total_paise=max_total_paise,
             max_per_txn_paise=max_per_txn_paise,
-            expires_at=datetime.now(UTC) + timedelta(days=30),
+            allow_categories=["groceries", "apparel"],
+            deny_categories=["gift_cards"],
+            substitution_tolerance="same_price",
+            expires_at=expires_at,
             nonce=uuid.uuid4().hex,
-            canonical_json='{"test":true}',
-            signature=rand_sig(),
-            mandate_hash=rand_hash(),
+        )
+        canonical = mandatemod.canonical_json(payload)
+        principal_key = keymod.derive_private_key(
+            AGENT_SEED, "principal", principal["principal_id"]
+        )
+
+        return await mandates.create(
+            conn,
+            mandate_id=mandate_id,
+            principal_id=principal["principal_id"],
+            agent_id=agent["agent_id"],
+            max_total_paise=max_total_paise,
+            max_per_txn_paise=max_per_txn_paise,
+            expires_at=expires_at,
+            nonce=payload["nonce"],
+            canonical_json=canonical,
+            signature=principal_key.sign(canonical.encode()),
+            mandate_hash=mandatemod.mandate_hash(payload),
             allow_categories=["groceries", "apparel"],
             deny_categories=["gift_cards"],
             substitution_tolerance="same_price",
         )
 
     return _make
+
+
+@pytest.fixture
+def nonce_store():
+    """In-memory. Named so its unsuitability for production is visible at the call site —
+    under multiple workers it is several disjoint sets and the control stops working."""
+    from dwaar.nonce import InMemoryNonceStore
+
+    return InMemoryNonceStore()
+
+
+@pytest.fixture
+def sign_headers():
+    """Produce real RFC 9421 headers for a request body.
+
+    Every pipeline test signs for real. A helper that skipped signing would mean the
+    authenticated path is exercised only by the tests that specifically test signing —
+    which is how an auth regression reaches a demo.
+    """
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+
+    from dwaar.crypto import http_sig
+    from dwaar.crypto import keys as keymod
+
+    def _sign(agent_id: str, body: dict, *, seed: int = 20260905,
+              method: str = "POST", path: str = "/v1/authorize",
+              created: int | None = None, nonce: str | None = None,
+              private_key=None):
+        raw = _json.dumps(body, separators=(",", ":")).encode()
+        key = private_key or keymod.derive_private_key(seed, "agent", agent_id)
+        headers = http_sig.sign_request(
+            key, method=method, path=path, body=raw, keyid=agent_id,
+            created=created if created is not None else int(_time.time()),
+            nonce=nonce or _uuid.uuid4().hex,
+        )
+        return headers, raw
+
+    return _sign
 
 
 @pytest.fixture(scope="session")
@@ -255,6 +347,7 @@ def write_record(signer):
             "principal_id": mandate["principal_id"],
             "mandate_hash": bytes(mandate["mandate_hash"]),
             "request_digest": rand_hash(),
+            "request_idempotency_key": None,
             "decision": decision,
             "reason_code": "allowed" if decision == "allow" else "denied",
             "injection_flag": False,
@@ -295,3 +388,50 @@ def make_signing_key():
         return kid
 
     return _make
+
+
+@pytest.fixture
+def authorize_signed(nonce_store, signer, settings):
+    """Run the pipeline with a REAL signature. The only way tests call authorize.
+
+    There is deliberately no unsigned path in the test suite: if one existed, most tests
+    would use it and the authenticated path would be exercised only by the tests that
+    specifically test authentication.
+    """
+    import json as _json
+    import time as _time
+    import uuid as _uuid
+
+    from dwaar.authorize import pipeline
+    from dwaar.authorize.types import AuthorizeRequest
+    from dwaar.crypto import http_sig
+    from dwaar.crypto import keys as keymod
+
+    async def _run(conn, request: AuthorizeRequest, *, commit=True, private_key=None,
+                   created=None, nonce=None, path="/v1/authorize", **kw):
+        body = _json.dumps(
+            {
+                "agent_id": request.agent_id,
+                "mandate_id": request.mandate_id,
+                "action": request.action,
+                "amount_paise": request.amount_paise,
+                "idempotency_key": request.idempotency_key,
+                "category": request.category,
+            },
+            separators=(",", ":"),
+        ).encode()
+        key = private_key or keymod.derive_private_key(AGENT_SEED, "agent", request.agent_id)
+        headers = http_sig.sign_request(
+            key, method="POST", path=path, body=body, keyid=request.agent_id,
+            created=created if created is not None else int(_time.time()),
+            nonce=nonce or _uuid.uuid4().hex,
+        )
+        outcome = await pipeline.authorize(
+            request, conn=conn, signer=signer, settings=settings,
+            headers=headers, body=body, path=path, nonce_store=nonce_store, **kw
+        )
+        if commit:
+            await conn.commit()
+        return outcome
+
+    return _run

@@ -17,7 +17,7 @@ def client():
     # Explicit DSNs, not whatever `.env` holds. `.env` carries Docker service hostnames
     # (`postgres:5432`) which do not resolve from the host, so inheriting it made every
     # setup wait out the startup connection timeout.
-    from tests.conftest import APP_DSN, MIGRATE_DSN, SUPERUSER_DSN
+    from tests.conftest import APP_DSN, MIGRATE_DSN, REDIS_URL, SUPERUSER_DSN
 
     app = create_app(
         Settings(
@@ -25,6 +25,7 @@ def client():
             DATABASE_URL_APP=APP_DSN,
             DATABASE_URL_MIGRATE=MIGRATE_DSN,
             DATABASE_URL_SUPERUSER=SUPERUSER_DSN,
+            REDIS_URL=REDIS_URL,
         )
     )
     with TestClient(app) as c:

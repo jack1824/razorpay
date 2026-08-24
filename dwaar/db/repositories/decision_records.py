@@ -49,7 +49,7 @@ _COLUMNS = (
     "agent_id, principal_id, mandate_hash, request_digest, decision, reason_code, "
     "rule_fired, risk_score, model_version, injection_flag, amount_paise, budget_before, "
     "budget_after, features, policy_version, latency_us, degraded_mode, stages_executed, "
-    "canonical_json, created_at"
+    "canonical_json, request_idempotency_key, created_at"
 )
 
 VALID_DECISIONS = frozenset({"allow", "bound", "throttle", "step_up", "deny"})
@@ -96,6 +96,22 @@ async def next_position(conn: AsyncConnection, merchant_id: str) -> ChainPositio
 async def get(conn: AsyncConnection, record_id: str) -> dict[str, Any] | None:
     return await fetch_one(
         conn, f"SELECT {_COLUMNS} FROM decision_records WHERE record_id = %s", (record_id,)
+    )
+
+
+async def get_by_request_key(
+    conn: AsyncConnection, mandate_hash: bytes | str, request_idempotency_key: str
+) -> dict[str, Any] | None:
+    """The replay lookup. One indexed hit, sub-millisecond.
+
+    Scoped to the mandate rather than global, for the same reason the ledger is: a global
+    lookup would let one agent observe and collide with another agent's key.
+    """
+    return await fetch_one(
+        conn,
+        f"SELECT {_COLUMNS} FROM decision_records "
+        f"WHERE mandate_hash = %s AND request_idempotency_key = %s",
+        (from_hex(mandate_hash, expect_len=HASH_BYTES), request_idempotency_key),
     )
 
 
@@ -180,15 +196,27 @@ async def append_signed(
             f"{position.seq}; inserting would store a signature over the wrong position"
         )
 
-    return await fetch_one(
+    # ON CONFLICT DO NOTHING on the request key, then re-SELECT.
+    #
+    # Two identical requests both miss the early replay lookup and race to here. The loser
+    # gets zero rows back and reads the winner's record. Deliberately NOT a bare
+    # `ON CONFLICT DO NOTHING`: that would also swallow a chain-uniqueness violation, which
+    # must never be absorbed silently — it would mean the advisory lock is not holding.
+    #
+    # No savepoint needed, because the transaction never enters a failed state.
+    row = await fetch_one(
         conn,
         f"INSERT INTO decision_records ("
         f"  merchant_id, seq, prev_hash, payload_hash, signature, signing_key_id, "
         f"  agent_id, principal_id, mandate_hash, request_digest, decision, reason_code, "
         f"  rule_fired, risk_score, model_version, injection_flag, amount_paise, "
         f"  budget_before, budget_after, features, policy_version, latency_us, "
-        f"  degraded_mode, stages_executed, canonical_json, created_at"
-        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        f"  degraded_mode, stages_executed, canonical_json, request_idempotency_key, "
+        f"  created_at"
+        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+        f"        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+        f"ON CONFLICT (mandate_hash, request_idempotency_key) "
+        f"  WHERE request_idempotency_key IS NOT NULL DO NOTHING "
         f"RETURNING {_COLUMNS}",
         (
             merchant_id,
@@ -216,9 +244,23 @@ async def append_signed(
             payload["degraded_mode"],
             payload["stages_executed"],
             canonical_json,
+            payload["request_idempotency_key"],
             created_at,
         ),
     )
+    if row is not None:
+        return row
+
+    # Lost the race. The winner's record is authoritative and is returned verbatim.
+    winner = await get_by_request_key(
+        conn, payload["mandate_hash"], payload["request_idempotency_key"]
+    )
+    if winner is None:
+        raise ChainError(
+            "decision record insert was absorbed as a duplicate but the original could not "
+            "be read back; the request-idempotency index and the insert disagree"
+        )
+    return winner
 
 
 async def verify_chain(

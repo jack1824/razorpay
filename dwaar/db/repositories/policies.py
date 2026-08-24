@@ -18,7 +18,7 @@ from dwaar.db.repositories.base import SIG_BYTES, execute, fetch_all, fetch_one,
 
 _COLUMNS = (
     "policy_id, merchant_id, version, source_nl, compiled_rules, generated_tests, "
-    "tests_passed, approved_by, signature, created_at"
+    "tests_passed, approved_by, signature, canonical_json, created_at"
 )
 
 
@@ -98,8 +98,23 @@ async def approve(
     """The human gate. Fails on the DB CHECK if the generated tests have not passed."""
     if not approved_by.strip():
         raise ValueError("approved_by must name a person; the gate is the point")
+
+    existing = await get(conn, policy_id)
+    if existing is None:
+        raise ValueError(f"unknown policy {policy_id}")
+
+    # The canonical form is computed from the row AS IT WILL BE after approval — the
+    # approver is inside what gets signed, so an approval cannot later be repointed at a
+    # different person or version.
+    canonical = None
+    if signature is not None:
+        from dwaar.crypto.integrity import POLICIES
+
+        canonical = POLICIES.rebuild({**existing, "approved_by": approved_by})
+
     return await execute(
         conn,
-        "UPDATE policies SET approved_by = %s, signature = %s WHERE policy_id = %s",
-        (approved_by, from_hex(signature, expect_len=SIG_BYTES), policy_id),
+        "UPDATE policies SET approved_by = %s, signature = %s, canonical_json = %s "
+        "WHERE policy_id = %s",
+        (approved_by, from_hex(signature, expect_len=SIG_BYTES), canonical, policy_id),
     ) == 1

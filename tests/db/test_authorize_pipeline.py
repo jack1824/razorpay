@@ -75,19 +75,17 @@ def make_request(mandate, *, amount=124_000, category="groceries", key=None):
     )
 
 
-async def run(conn, request, signer, settings, **kw):
-    outcome = await pipeline.authorize(
-        request, conn=conn, signer=signer, settings=settings, **kw
-    )
-    await conn.commit()
-    return outcome
+# Every call signs for real. See conftest.authorize_signed.
+async def run(conn, request, authorize_signed, **kw):
+    return await authorize_signed(conn, request, **kw)
 
 
 # ── the happy path ──────────────────────────────────────────────────────────────────
 
-async def test_a_permitted_request_is_allowed_and_chained(app_dsn, scenario, signer, settings):
+async def test_a_permitted_request_is_allowed_and_chained(app_dsn, scenario, authorize_signed
+):
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        outcome = await run(conn, make_request(scenario["mandate"]), signer, settings)
+        outcome = await run(conn, make_request(scenario["mandate"]), authorize_signed)
 
     assert outcome.decision.decision == "allow"
     assert outcome.seq == 1
@@ -96,20 +94,22 @@ async def test_a_permitted_request_is_allowed_and_chained(app_dsn, scenario, sig
     assert outcome.latency_us > 0
 
 
-async def test_every_stage_is_timed(app_dsn, scenario, signer, settings):
+async def test_every_stage_is_timed(app_dsn, scenario, authorize_signed
+):
     """Per-stage timings are what make the latency story legible rather than asserted."""
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        outcome = await run(conn, make_request(scenario["mandate"]), signer, settings)
+        outcome = await run(conn, make_request(scenario["mandate"]), authorize_signed)
 
     assert set(outcome.stage_timings_us) == set(pipeline.STAGE_ORDER)
     assert all(v >= 0 for v in outcome.stage_timings_us.values())
 
 
-async def test_every_stub_declares_itself_on_the_record(app_dsn, scenario, signer, settings):
+async def test_every_stub_declares_itself_on_the_record(app_dsn, scenario, authorize_signed
+):
     """Phase 3 records must be self-labelling. A stub that does not appear in
     degraded_mode is a stub that can be demoed as working."""
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        outcome = await run(conn, make_request(scenario["mandate"]), signer, settings)
+        outcome = await run(conn, make_request(scenario["mandate"]), authorize_signed)
         record = await decision_records.get(conn, outcome.record_id)
 
     assert set(record["degraded_mode"]) == set(pipeline.STUB_STAGES.values())
@@ -121,7 +121,7 @@ async def test_every_stub_declares_itself_on_the_record(app_dsn, scenario, signe
 # ── DEMO BEAT 2, as a CI gate ───────────────────────────────────────────────────────
 
 async def test_beat_2_per_txn_breach_denies_with_null_risk_score(
-    app_dsn, scenario, signer, settings
+    app_dsn, scenario, authorize_signed
 ):
     """₹12,000 against a ₹5,000 per-transaction cap, with ₹50,000 still available.
 
@@ -130,8 +130,9 @@ async def test_beat_2_per_txn_breach_denies_with_null_risk_score(
     """
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await run(
-            conn, make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
-            signer, settings,
+            conn,
+            make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
+            authorize_signed,
         )
         record = await decision_records.get(conn, outcome.record_id)
 
@@ -141,14 +142,16 @@ async def test_beat_2_per_txn_breach_denies_with_null_risk_score(
     assert record["model_version"] is None
 
 
-async def test_beat_2_touches_no_ledger_entry(app_dsn, scenario, signer, settings):
+async def test_beat_2_touches_no_ledger_entry(app_dsn, scenario, authorize_signed
+):
     """A refusal on the mandate's own terms must not move the ledger at all."""
     mandate_id = scenario["mandate"]["mandate_id"]
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         before = await budget_ledger.history(conn, mandate_id)
         await run(
-            conn, make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
-            signer, settings,
+            conn,
+            make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
+            authorize_signed,
         )
         after = await budget_ledger.history(conn, mandate_id)
 
@@ -156,7 +159,7 @@ async def test_beat_2_touches_no_ledger_entry(app_dsn, scenario, signer, setting
 
 
 async def test_beat_2_never_invokes_the_risk_model(
-    app_dsn, scenario, signer, settings, monkeypatch
+    app_dsn, scenario, signer, authorize_signed, monkeypatch
 ):
     """THE assertion. The other two pass vacuously while stage 4 is stubbed.
 
@@ -177,8 +180,9 @@ async def test_beat_2_never_invokes_the_risk_model(
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         breach = await run(
-            conn, make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
-            signer, settings,
+            conn,
+            make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
+            authorize_signed,
         )
         assert breach.decision.decision == "deny"
         assert calls == [], (
@@ -188,17 +192,19 @@ async def test_beat_2_never_invokes_the_risk_model(
         )
 
         # And the control: a permitted request DOES reach the model.
-        allowed = await run(conn, make_request(scenario["mandate"]), signer, settings)
+        allowed = await run(conn, make_request(scenario["mandate"]), authorize_signed)
         assert allowed.decision.decision == "allow"
         assert calls == [1], "a permitted request must still be scored"
 
 
-async def test_beat_2_record_says_which_stages_ran(app_dsn, scenario, signer, settings):
+async def test_beat_2_record_says_which_stages_ran(app_dsn, scenario, authorize_signed
+):
     """`features={}` alone is indistinguishable from a computed-and-empty feature set."""
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await run(
-            conn, make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
-            signer, settings,
+            conn,
+            make_request(scenario["mandate"], amount=1_200_000, category="groceries"),
+            authorize_signed,
         )
         record = await decision_records.get(conn, outcome.record_id)
 
@@ -216,7 +222,7 @@ async def test_beat_2_record_says_which_stages_ran(app_dsn, scenario, signer, se
 # ── the other side of the distinction ───────────────────────────────────────────────
 
 async def test_cumulative_exhaustion_denies_after_being_scored(
-    owner_dsn, app_dsn, make_mandate, signer, settings
+    owner_dsn, app_dsn, make_mandate, authorize_signed, signer
 ):
     """The counterpart to beat 2, and the reason the distinction needs stating.
 
@@ -234,10 +240,10 @@ async def test_cumulative_exhaustion_denies_after_being_scored(
     await setup.close()
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        first = await run(conn, make_request(mandate, amount=100_000), signer, settings)
+        first = await run(conn, make_request(mandate, amount=100_000), authorize_signed)
         assert first.decision.decision == "allow"
 
-        second = await run(conn, make_request(mandate, amount=1_000), signer, settings)
+        second = await run(conn, make_request(mandate, amount=1_000), authorize_signed)
         record = await decision_records.get(conn, second.record_id)
 
     assert second.decision.decision == "deny"
@@ -256,12 +262,13 @@ async def test_cumulative_exhaustion_denies_after_being_scored(
     ],
 )
 async def test_category_denials_also_short_circuit(
-    app_dsn, scenario, signer, settings, category, rule
+    app_dsn, scenario, signer, authorize_signed, category, rule
 ):
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await run(
-            conn, make_request(scenario["mandate"], amount=1_000, category=category),
-            signer, settings,
+            conn,
+            make_request(scenario["mandate"], amount=1_000, category=category),
+            authorize_signed,
         )
         record = await decision_records.get(conn, outcome.record_id)
 
@@ -271,10 +278,11 @@ async def test_category_denials_also_short_circuit(
     assert "score_risk" not in record["stages_executed"]
 
 
-async def test_an_expired_mandate_denies_before_scoring(app_dsn, scenario, signer, settings):
+async def test_an_expired_mandate_denies_before_scoring(app_dsn, scenario, authorize_signed
+):
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await run(
-            conn, make_request(scenario["mandate"]), signer, settings,
+            conn, make_request(scenario["mandate"]), authorize_signed,
             now=datetime.now(UTC) + timedelta(days=365),
         )
         record = await decision_records.get(conn, outcome.record_id)
@@ -285,7 +293,8 @@ async def test_an_expired_mandate_denies_before_scoring(app_dsn, scenario, signe
 
 # ── what does and does not get chained ──────────────────────────────────────────────
 
-async def test_an_unknown_mandate_is_never_chained(app_dsn, scenario, signer, settings):
+async def test_an_unknown_mandate_is_never_chained(app_dsn, scenario, authorize_signed
+):
     """No resolved merchant means no chain to write to.
 
     Chaining unattributable requests would hand anyone with an HTTP client write access to
@@ -294,7 +303,8 @@ async def test_an_unknown_mandate_is_never_chained(app_dsn, scenario, signer, se
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         before = len(await decision_records.iter_chain(conn, scenario["merchant"]))
         with pytest.raises(pipeline.Unresolvable):
-            await pipeline.authorize(
+            await authorize_signed(
+                conn,
                 AuthorizeRequest(
                     agent_id=scenario["mandate"]["agent_id"],
                     mandate_id="mnd_doesnotexist",
@@ -303,7 +313,7 @@ async def test_an_unknown_mandate_is_never_chained(app_dsn, scenario, signer, se
                     idempotency_key=f"{rand_id('k')}-xxxxxxxx",
                     category="groceries",
                 ),
-                conn=conn, signer=signer, settings=settings,
+                commit=False,
             )
         await conn.rollback()
         after = len(await decision_records.iter_chain(conn, scenario["merchant"]))
@@ -312,7 +322,7 @@ async def test_an_unknown_mandate_is_never_chained(app_dsn, scenario, signer, se
 
 
 async def test_a_mandate_presented_by_the_wrong_agent_does_not_resolve(
-    app_dsn, scenario, signer, settings, owner_dsn, make_agent
+    app_dsn, scenario, signer, authorize_signed, owner_dsn, make_agent
 ):
     """Not a lookup miss — an attempt to exercise someone else's authority."""
     setup = await psycopg.AsyncConnection.connect(owner_dsn)
@@ -322,7 +332,8 @@ async def test_a_mandate_presented_by_the_wrong_agent_does_not_resolve(
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         with pytest.raises(pipeline.Unresolvable):
-            await pipeline.authorize(
+            await authorize_signed(
+                conn,
                 AuthorizeRequest(
                     agent_id=intruder["agent_id"],
                     mandate_id=scenario["mandate"]["mandate_id"],
@@ -331,13 +342,13 @@ async def test_a_mandate_presented_by_the_wrong_agent_does_not_resolve(
                     idempotency_key=f"{rand_id('k')}-xxxxxxxx",
                     category="groceries",
                 ),
-                conn=conn, signer=signer, settings=settings,
+                commit=False,
             )
         await conn.rollback()
 
 
 async def test_a_revoked_mandate_is_denied_and_chained(
-    owner_dsn, app_dsn, make_mandate, signer, settings
+    owner_dsn, app_dsn, make_mandate, authorize_signed, signer
 ):
     """Resolved but withdrawn: we know exactly whose authority ended, so it is evidence."""
     from dwaar.db.repositories import mandates as mandate_repo
@@ -351,7 +362,7 @@ async def test_a_revoked_mandate_is_denied_and_chained(
     await setup.close()
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        outcome = await run(conn, make_request(mandate), signer, settings)
+        outcome = await run(conn, make_request(mandate), authorize_signed)
         record = await decision_records.get(conn, outcome.record_id)
 
     assert outcome.decision.decision == "deny"
@@ -361,13 +372,14 @@ async def test_a_revoked_mandate_is_denied_and_chained(
 
 # ── the chain, now that records are genuinely signed ────────────────────────────────
 
-async def test_the_chain_verifies_end_to_end(app_dsn, owner_dsn, scenario, signer, settings):
+async def test_the_chain_verifies_end_to_end(app_dsn, owner_dsn, scenario, authorize_signed
+):
     """Earned early: stage 8 signs for real from Phase 3, so verification lands now."""
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         for i in range(12):
             await run(
-                conn, make_request(scenario["mandate"], amount=1_000 + i), signer, settings
-            )
+                conn, make_request(scenario["mandate"], amount=1_000 + i), authorize_signed
+)
 
     async with await psycopg.AsyncConnection.connect(owner_dsn) as conn:
         result = await decision_records.verify_chain(conn, scenario["merchant"])
@@ -379,7 +391,7 @@ async def test_the_chain_verifies_end_to_end(app_dsn, owner_dsn, scenario, signe
 
 
 async def test_tampering_breaks_the_chain_and_names_the_seq(
-    app_dsn, superuser_dsn, owner_dsn, scenario, signer, settings
+    app_dsn, superuser_dsn, owner_dsn, scenario, authorize_signed
 ):
     """Demo beat 6, as a test.
 
@@ -389,7 +401,7 @@ async def test_tampering_breaks_the_chain_and_names_the_seq(
     """
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         for i in range(5):
-            await run(conn, make_request(scenario["mandate"], amount=1_000 + i), signer, settings)
+            await run(conn, make_request(scenario["mandate"], amount=1_000 + i), authorize_signed)
 
     async with await psycopg.AsyncConnection.connect(superuser_dsn) as su:
         async with su.cursor() as cur:
@@ -413,7 +425,7 @@ async def test_tampering_breaks_the_chain_and_names_the_seq(
 
 
 async def test_tampering_with_the_signed_bytes_is_also_caught(
-    app_dsn, superuser_dsn, owner_dsn, scenario, signer, settings
+    app_dsn, superuser_dsn, owner_dsn, scenario, authorize_signed
 ):
     """The smarter attacker: rewrite canonical_json to match the new column value.
 
@@ -421,7 +433,7 @@ async def test_tampering_with_the_signed_bytes_is_also_caught(
     """
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         for i in range(3):
-            await run(conn, make_request(scenario["mandate"], amount=1_000 + i), signer, settings)
+            await run(conn, make_request(scenario["mandate"], amount=1_000 + i), authorize_signed)
 
     async with await psycopg.AsyncConnection.connect(superuser_dsn) as su:
         async with su.cursor() as cur:
@@ -441,7 +453,7 @@ async def test_tampering_with_the_signed_bytes_is_also_caught(
 
 
 async def test_concurrent_requests_produce_a_contiguous_chain(
-    app_dsn, owner_dsn, scenario, signer, settings
+    app_dsn, owner_dsn, scenario, authorize_signed
 ):
     """What BIGSERIAL would have broken. 25 concurrent requests, one merchant."""
     async def one(i: int) -> str:
@@ -451,9 +463,7 @@ async def test_concurrent_requests_produce_a_contiguous_chain(
                     conn,
                     make_request(
                         scenario["mandate"], amount=1_000, key=f"conc-{i:04d}-{'x' * 8}"
-                    ),
-                    signer, settings,
-                )
+                    ), authorize_signed)
                 return "ok"
             except Exception as exc:  # noqa: BLE001
                 return f"error:{type(exc).__name__}:{exc}"
@@ -471,16 +481,80 @@ async def test_concurrent_requests_produce_a_contiguous_chain(
     assert verified["gaps"] == []
 
 
-async def test_a_duplicate_idempotency_key_does_not_double_charge(
-    app_dsn, scenario, signer, settings
+async def test_a_replayed_request_returns_the_original_decision_verbatim(
+    app_dsn, owner_dsn, scenario, authorize_signed
 ):
-    """Two authorize calls with one key: the budget moves once."""
+    """One logical decision, one record. Previously this minted a phantom second record.
+
+    The replay returns the ORIGINAL — same decision_id, same chain_seq, same verdict —
+    because the question was already answered and answering it differently the second time
+    would make the record a worse account of what happened.
+    """
     key = f"{rand_id('dupe')}-xxxxxxxx"
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        first = await run(conn, make_request(scenario["mandate"], key=key), signer, settings)
-        second = await run(conn, make_request(scenario["mandate"], key=key), signer, settings)
+        first = await run(conn, make_request(scenario["mandate"], key=key), authorize_signed)
+        second = await run(conn, make_request(scenario["mandate"], key=key), authorize_signed)
 
-    assert first.budget_remaining_paise == second.budget_remaining_paise
-    # Both are chained, because each is a decision that was genuinely rendered. See the
-    # open question in FAILURES.md about idempotency on decision_records.
-    assert first.seq != second.seq
+    assert second.record_id == first.record_id
+    assert second.seq == first.seq
+    assert second.decision.decision == first.decision.decision
+    assert second.budget_remaining_paise == first.budget_remaining_paise
+    assert second.replayed is True and first.replayed is False
+
+    async with await psycopg.AsyncConnection.connect(owner_dsn) as conn:
+        rows = await decision_records.iter_chain(conn, scenario["merchant"])
+    matching = [
+        r for r in rows
+        if r["request_idempotency_key"] == f"rsv:{key}"
+    ]
+    assert len(matching) == 1, (
+        f"exactly one record per logical decision, found {len(matching)}"
+    )
+
+
+async def test_a_replay_short_circuits_before_any_work(
+    app_dsn, scenario, signer, authorize_signed, monkeypatch
+):
+    """The replay lookup runs after stage 2 and before the gate, so a replay costs one
+    indexed hit rather than the whole pipeline."""
+    key = f"{rand_id('fast')}-xxxxxxxx"
+    async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
+        await run(conn, make_request(scenario["mandate"], key=key), authorize_signed)
+
+        calls = []
+        original = pipeline.risk_stage.score_risk
+
+        async def spy(*args, **kwargs):
+            calls.append(1)
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline.risk_stage, "score_risk", spy)
+        replay = await run(conn, make_request(scenario["mandate"], key=key), authorize_signed)
+
+    assert replay.replayed is True
+    assert calls == [], "a replay must not re-run the judgment stages"
+    assert "reserve_budget" not in replay.stage_timings_us
+
+
+async def test_the_same_key_on_a_different_mandate_is_not_a_replay(
+    owner_dsn, app_dsn, make_mandate, authorize_signed, signer
+):
+    """Idempotency is scoped to the mandate, not global.
+
+    Two mandates are separate budgets and separate authorities. A global scope let one
+    agent burn another agent's key — a cross-tenant denial of service and an oracle.
+    """
+    key = f"{rand_id('shared')}-xxxxxxxx"
+    setup = await psycopg.AsyncConnection.connect(owner_dsn)
+    first_mandate = await make_mandate(setup, merchant_id=rand_id("mch"))
+    second_mandate = await make_mandate(setup, merchant_id=rand_id("mch"))
+    await ensure_registered(setup, signer)
+    await setup.commit()
+    await setup.close()
+
+    async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
+        a = await run(conn, make_request(first_mandate, key=key), authorize_signed)
+        b = await run(conn, make_request(second_mandate, key=key), authorize_signed)
+
+    assert a.record_id != b.record_id
+    assert a.replayed is False and b.replayed is False

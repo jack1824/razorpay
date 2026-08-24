@@ -75,6 +75,21 @@ jobs:
       - name: Rule 3 — zoo is not importable from dwaar
         run: python -m pytest -q -p no:cacheprovider tests/test_import_isolation.py
 
+      - name: Rule 3 positive controls — the guards can actually fail
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/test_absence_controls.py \
+            tests/crypto/test_integrity.py
+
+      - name: Independent verifier — tamper any column, on any signed table
+        run: python -m pytest -q -p no:cacheprovider tests/db/test_verify_cli.py
+
+      - name: RFC 9421 — known-answer vectors and the signature stage
+        run: |
+          python -m pytest -q -p no:cacheprovider \
+            tests/crypto/test_http_sig.py \
+            tests/db/test_signature_stage.py
+
       - name: Demo beat 2 — arithmetic deny, model never consulted
         run: |
           python -m pytest -q -p no:cacheprovider \

@@ -70,6 +70,7 @@ async def write_decision_record(
     stages_executed: list[str],
     agent_id: str,
     amount_paise: int | None,
+    request_idempotency_key: str | None,
 ) -> RecordResult:
     if mandate.merchant_id is None or mandate.mandate_hash is None:
         # No resolved merchant means no chain to write to — merchant_id is the shard key.
@@ -93,6 +94,7 @@ async def write_decision_record(
         principal_id=mandate.principal_id,
         mandate_hash=mandate.mandate_hash,
         request_digest=request_digest,
+        request_idempotency_key=request_idempotency_key,
         decision=decision.decision,
         reason_code=decision.reason_code,
         rule_fired=decision.rule_fired,

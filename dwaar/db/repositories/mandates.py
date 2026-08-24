@@ -14,6 +14,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from dwaar import idempotency
 from dwaar.db.repositories.base import (
     HASH_BYTES,
     SIG_BYTES,
@@ -31,15 +32,10 @@ _COLUMNS = (
 
 GENESIS_REASON = "mandate_created"
 
-
-def genesis_key(mandate_id: str) -> str:
-    """The genesis idempotency key.
-
-    Doubles as the 'already initialised' guard for free: a second attempt to create the
-    genesis entry violates ``idempotency_key UNIQUE`` rather than silently doubling the
-    mandate's budget.
-    """
-    return f"genesis:{mandate_id}"
+# Re-exported so callers do not reimplement the derivation. The rules live in one module
+# (dwaar/idempotency.py) because a key derived one way here and another way in
+# budget_ledger.release is a collision waiting for traffic.
+genesis_key = idempotency.genesis_key
 
 
 async def create(
@@ -101,7 +97,7 @@ async def create(
             mandate_id,
             max_total_paise,
             max_total_paise,
-            genesis_key(mandate_id),
+            idempotency.genesis_key(mandate_id),
             GENESIS_REASON,
         ),
     )

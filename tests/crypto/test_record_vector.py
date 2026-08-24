@@ -27,6 +27,7 @@ VECTOR_FIELDS = {
     "principal_id": "prn_000000000001",
     "mandate_hash": bytes.fromhex("bb" * 32),
     "request_digest": bytes.fromhex("cc" * 32),
+    "request_idempotency_key": "rsv:client-key-0001",
     "decision": "deny",
     "reason_code": "denied",
     "rule_fired": "mandate.max_per_txn",
@@ -71,6 +72,7 @@ EXPECTED_CANONICAL = (
     '"principal_id":"prn_000000000001",'
     '"reason_code":"denied",'
     '"request_digest":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",'
+    '"request_idempotency_key":"rsv:client-key-0001",'
     '"risk_score":null,'
     '"rule_fired":"mandate.max_per_txn",'
     '"seq":42,'

@@ -25,6 +25,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from dwaar import idempotency
 from dwaar.authorize.stages import authority as authority_stage
 from dwaar.authorize.stages import decision as decision_stage
 from dwaar.authorize.stages import features as features_stage
@@ -37,17 +38,24 @@ from dwaar.authorize.stages import signature as signature_stage
 from dwaar.authorize.types import AuthorizeRequest, Decision
 from dwaar.config import Settings
 from dwaar.crypto.signer import Signer
+from dwaar.db.repositories import decision_records
 from dwaar.errors import ChainError
 from dwaar.logging import get_logger
 from dwaar.metrics import authorize_duration, decisions_total, stage_duration
+from dwaar.nonce import NonceStore
 
 log = get_logger("dwaar.authorize")
+
+# Not a stage in the ARCHITECTURE table: it is a short-circuit that runs before the work,
+# so it is named separately and still timed.
+REPLAY_STAGE = "replay_lookup"
 
 # The stage names, in order. `tests/test_stub_contracts.py` enumerates this rather than a
 # hand-written list, so a stage added without a degradation token cannot slip through.
 STAGE_ORDER: tuple[str, ...] = (
     signature_stage.STAGE_NAME,
     mandate_stage.STAGE_NAME,
+    REPLAY_STAGE,
     authority_stage.STAGE_NAME,
     features_stage.STAGE_NAME,
     risk_stage.STAGE_NAME,
@@ -57,8 +65,8 @@ STAGE_ORDER: tuple[str, ...] = (
     record_stage.STAGE_NAME,
 )
 
+# Stage 1 became real on 25 Aug: `signature_unverified` no longer appears on any record.
 STUB_STAGES: dict[str, str] = {
-    signature_stage.STAGE_NAME: signature_stage.DEGRADED_TOKEN,
     features_stage.STAGE_NAME: features_stage.DEGRADED_TOKEN,
     risk_stage.STAGE_NAME: risk_stage.DEGRADED_TOKEN,
     policy_stage.STAGE_NAME: policy_stage.DEGRADED_TOKEN,
@@ -94,6 +102,34 @@ class PipelineOutcome:
     stage_timings_us: dict[str, int] = field(default_factory=dict)
     degraded_mode: list[str] = field(default_factory=list)
     stages_executed: list[str] = field(default_factory=list)
+    replayed: bool = False
+    """True when this outcome was read back from an existing record, not decided afresh."""
+
+
+def _replayed(row, timer: _Timer, started: float) -> PipelineOutcome:
+    """Rebuild the outcome from a stored record.
+
+    The verdict returned to the caller is the one that was actually chained. `latency_us`
+    is the CURRENT call's latency, not the original's: the caller waited this long, and
+    reporting the first request's timing would be a measurement of something that did not
+    happen. The record keeps the original.
+    """
+    return PipelineOutcome(
+        decision=Decision(
+            decision=row["decision"],
+            reason_code=row["reason_code"],
+            internal_reason="replayed",
+            rule_fired=row["rule_fired"],
+        ),
+        record_id=str(row["record_id"]),
+        seq=row["seq"],
+        budget_remaining_paise=row["budget_after"],
+        latency_us=int((time.perf_counter() - started) * 1_000_000),
+        stage_timings_us=timer.timings,
+        degraded_mode=list(row["degraded_mode"]),
+        stages_executed=list(row["stages_executed"]),
+        replayed=True,
+    )
 
 
 class _Timer:
@@ -125,6 +161,9 @@ async def authorize(
     settings: Settings,
     headers: dict[str, str] | None = None,
     body: bytes = b"",
+    method: str = "POST",
+    path: str = "/v1/authorize",
+    nonce_store: NonceStore | None = None,
     now: datetime | None = None,
 ) -> PipelineOutcome:
     """Run the pipeline. The caller owns the transaction and commits on success."""
@@ -137,7 +176,17 @@ async def authorize(
     # ── 1. signature ────────────────────────────────────────────────────────────────
     signature = await timer.run(
         signature_stage.STAGE_NAME,
-        signature_stage.verify_signature(request, headers or {}, settings=settings, conn=conn),
+        signature_stage.verify_signature(
+            request,
+            headers or {},
+            settings=settings,
+            conn=conn,
+            body=body,
+            method=method,
+            path=path,
+            nonce_store=nonce_store,
+            now=now,
+        ),
     )
     executed.append(signature_stage.STAGE_NAME)
     if signature.degraded:
@@ -152,6 +201,22 @@ async def authorize(
     executed.append(mandate_stage.STAGE_NAME)
     if mandate.merchant_id is None:
         raise Unresolvable(mandate.internal_reason or "mandate_unresolvable")
+
+    # ── 2.1 replay. One indexed lookup, before any work. ────────────────────────────
+    #
+    # Checked HERE rather than at stage 8 so a replay costs a single index hit instead of
+    # the whole pipeline. Returning the original verbatim — same decision_id, same
+    # chain_seq, same verdict — is correct for every outcome including throttle and
+    # step_up: the question was already answered, and answering it differently the second
+    # time would make the record a worse account of what happened.
+    request_key = idempotency.reserve_key(request.idempotency_key)
+    if mandate.mandate_hash is not None:
+        prior = await timer.run(
+            REPLAY_STAGE,
+            decision_records.get_by_request_key(conn, mandate.mandate_hash, request_key),
+        )
+        if prior is not None:
+            return _replayed(prior, timer, started)
 
     features = risk = policy = ledger = None
 
@@ -241,6 +306,7 @@ async def authorize(
             stages_executed=executed + [record_stage.STAGE_NAME],
             agent_id=request.agent_id,
             amount_paise=request.amount_paise,
+            request_idempotency_key=request_key,
         ),
     )
     executed.append(record_stage.STAGE_NAME)

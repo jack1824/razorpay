@@ -27,6 +27,7 @@ from dwaar.authorize.types import AuthorizeRequest
 from dwaar.errors import ChainError, LedgerError
 from dwaar.logging import get_logger
 from dwaar.money import MAX_AMOUNT_PAISE
+from dwaar.nonce import NonceStoreUnavailable
 
 log = get_logger("dwaar.api.authorize")
 
@@ -101,6 +102,9 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
                 settings=settings,
                 headers=dict(request.headers),
                 body=request_bytes,
+                method=request.method,
+                path=request.url.path,
+                nonce_store=app.state.nonce_store,
             )
         except pipeline.Unauthenticated:
             await conn.rollback()
@@ -130,7 +134,7 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
                 media_type="application/json",
                 status_code=status.HTTP_403_FORBIDDEN,
             )
-        except (LedgerError, ChainError) as exc:
+        except (LedgerError, ChainError, NonceStoreUnavailable) as exc:
             await conn.rollback()
             log.error("authorize_unavailable", error_type=type(exc).__name__)
             return Response(

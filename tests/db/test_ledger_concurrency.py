@@ -20,6 +20,7 @@ import asyncio
 import psycopg
 import pytest
 
+from dwaar import idempotency
 from dwaar.db.repositories import budget_ledger
 from dwaar.errors import InsufficientBudget
 
@@ -172,7 +173,9 @@ async def test_duplicate_idempotency_key_under_concurrency_charges_once(
     finally:
         await conn.close()
 
-    charged = [e for e in entries if e["idempotency_key"] == key]
+    # The stored key is namespaced. An agent's raw string never reaches storage — see
+    # dwaar/idempotency.py for why that is a security property, not tidiness.
+    charged = [e for e in entries if e["idempotency_key"] == idempotency.reserve_key(key)]
     assert len(charged) == 1, (
         f"idempotency_key {key!r} produced {len(charged)} ledger entries; "
         "a duplicate webhook must be absorbed, not charged twice"

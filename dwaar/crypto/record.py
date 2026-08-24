@@ -20,6 +20,8 @@ What is signed, and why each exclusion is deliberate:
 - ``payload_hash`` and ``signature`` are **out** — both are circular.
 - ``record_id`` is **out**. It is a database-assigned UUID with no semantic content; ``seq``
   is the identity that everything else references.
+- ``request_idempotency_key`` is **in**. It identifies *which* request this record answers.
+  A record that could be repointed at a different request would be evidence of nothing.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ SIGNED_FIELDS: tuple[str, ...] = (
     "principal_id",
     "mandate_hash",
     "request_digest",
+    "request_idempotency_key",
     # what was decided
     "decision",
     "reason_code",
@@ -67,6 +70,7 @@ SIGNED_FIELDS: tuple[str, ...] = (
 # give one record two valid hashes.
 NULLABLE_FIELDS: frozenset[str] = frozenset(
     {
+        "request_idempotency_key",
         "rule_fired",
         "risk_score",
         "model_version",

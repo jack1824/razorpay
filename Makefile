@@ -87,14 +87,10 @@ clean:
 # does not exist — the same failure mode as a hardcoded metric, and it fails at the
 # worst possible moment. Non-zero until the thing is real.
 
+# The independent verifier. Read-only connection, no write path, no cooperation from the
+# running service required — that is what makes its report worth anything.
 verify:
-	@echo "make verify — NOT IMPLEMENTED"
-	@echo ""
-	@echo "  Lands day 4 with the crypto layer (docs/strategy/BUILD_PLAN.md)."
-	@echo "  Will verify: per-merchant hash chains, Ed25519 signatures resolved via"
-	@echo "  signing_keys.key_id, and the budget invariants in"
-	@echo "  dwaar/db/repositories/budget_ledger.py:check_invariants."
-	@exit 2
+	$(PY) -m dwaar.verify_cli --dsn "$(DATABASE_URL_APP)"
 
 eval:
 	@echo "make eval — NOT IMPLEMENTED"

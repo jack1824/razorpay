@@ -12,7 +12,7 @@ flowchart LR
 
   subgraph DWAAR["POST /v1/authorize — 8 stages, p99 target 25ms, zero LLM calls"]
     direction TB
-    S1["1 · signature<br/>Ed25519 · fail-closed"]:::soon
+    S1["1 · signature<br/>RFC 9421 · fail-closed"]:::done
     S2["2 · mandate<br/>verify · fail-closed"]:::done
     G["2.5 · AUTHORITY GATE<br/>pure arithmetic · no I/O"]:::done
     S3["3 · features<br/>Redis · degrade"]:::soon
@@ -84,8 +84,8 @@ make bootstrap-local   # same two roles, same ownership, as the Compose init scr
 make test
 ```
 
-`make verify`, `make eval` and `make demo` exist and **exit 2** — they are not implemented
-yet. A stub that exits 0 is a green light for something that does not exist, which is the
+`make verify` is real. `make eval` and `make demo` exist and **exit 2** — they are not
+implemented yet. A stub that exits 0 is a green light for something that does not exist, which is the
 same failure mode as a hardcoded metric.
 
 > **`make up` is currently unverified.** Docker is not installed on the development machine
@@ -97,8 +97,9 @@ same failure mode as a hardcoded metric.
 
 ## Status
 
-Phases 1–3 are complete: repository, data model, and a working `POST /v1/authorize` that
-signs and chains every decision it renders.
+Phases 1–4 are complete: repository, data model, a working `POST /v1/authorize` that
+verifies real RFC 9421 signatures and chains every decision it renders, and an independent
+verifier.
 
 **Deadline is 2 September.** Nine days, not fourteen.
 
@@ -106,7 +107,10 @@ signs and chains every decision it renders.
 |---|---|
 | `POST /v1/authorize` — 8 stages + arithmetic gate, per-stage timing | ✅ |
 | Signed, hash-chained decision records + chain verification | ✅ |
-| Latency gates in CI: pipeline p99 **2.11ms** vs a 25ms budget | ✅ |
+| Latency gates in CI: pipeline p99 **3.60ms** vs a 25ms budget | ✅ |
+| RFC 9421 inbound verification, key rotation overlap, replay defence | ✅ |
+| `make verify` — independent verifier, read-only, no write path | ✅ |
+| Idempotency scoped per mandate, namespaced against forgery | ✅ |
 | Package skeleton, Compose, Makefile, CI | ✅ |
 | Structured JSON logging, per-request trace IDs, PII allowlist | ✅ |
 | `GET /health` | ✅ |
@@ -118,7 +122,6 @@ signs and chains every decision it renders.
 
 | Scheduled | Date |
 |---|---|
-| RFC 9421 inbound verification, verifier CLI | 25 Aug |
 | Policy engine + compiler CLI | 26 Aug |
 | Features + risk model | 27 Aug |
 | Agent zoo (4 agents; 2 held out, separate session) | 28 Aug |

@@ -563,3 +563,109 @@ Two tests cover it: the naive tamper (edit a column) and the smarter one (edit
 forge).
 
 The `mandates` half of this is still open and lands with the verifier CLI on 25 Aug.
+
+---
+
+## 2026-08-24 — Phase 4: idempotency, RFC 9421, the verifier
+
+---
+
+### F-017 — Idempotency was a cross-tenant denial of service — FIXED
+
+**Found:** flagged in the Phase 3 review, decided in the Phase 4 brief, fixed here.
+
+`idempotency_key TEXT NOT NULL UNIQUE` was **global**, and the key is supplied by the agent,
+and the agent is untrusted. Three consequences, one of them a security bug:
+
+1. Agent A could burn a key belonging to agent B on an unrelated mandate. B's request fails
+   as a duplicate and receives A's outcome. It is also an oracle: A learns whether B is
+   using a given key.
+2. An agent could submit `idempotency_key = "release:1234"`. When the system later released
+   ledger entry 1234, its derived key collided, the insert was absorbed as a duplicate,
+   **the release silently no-opped, and that reservation leaked permanently** — budget
+   consumed forever against nothing.
+3. `decision_records` had no idempotency key at all, so a replayed authorize deduped at the
+   ledger and still minted a second chained record. Two records for one logical decision.
+
+**What we got wrong:** we took `UNIQUE` on a column whose value comes from an untrusted
+party as a safety property. It is a safety property only once the *scope* and the
+*namespace* are also decided, and neither was.
+
+**Fix:** `UNIQUE (mandate_id, idempotency_key)`; every client key stored prefixed `rsv:`;
+server-derived keys in their own namespaces (`genesis:`, `release:<entry_id>`,
+`settle:<entry_id>`); `request_idempotency_key` on `decision_records` with
+`UNIQUE (mandate_hash, request_idempotency_key)`; and a replay lookup after stage 2 that
+returns the original decision verbatim.
+
+Prefixing is a *property*, not a validation: nothing has to remember to check agent input,
+because the namespaces cannot overlap. `release:<entry_id>` also makes releases idempotent
+for free.
+
+---
+
+### F-018 — Test fixtures wrote mandates a verifier would reject — FIXED
+
+**Found:** the first run of `make verify`, which failed on every mandate in the database.
+
+`make_mandate` wrote `canonical_json='{"test":true}'` with a random `mandate_hash`. Every
+mandate the suite had ever created was, in the verifier's terms, tampered: columns that
+disagree with the bytes that were signed.
+
+**Why it matters more than a fixture bug:** fixtures a verifier rejects cannot be used to
+*test* a verifier. Every chain test would have needed the check disabled, and the natural
+next step is to disable it.
+
+**Fix:** fixtures build a real canonical form and sign it with a derived principal key. Test
+data is now indistinguishable from production data, which is the only state in which a test
+of an integrity control means anything.
+
+---
+
+### F-019 — The same timezone bug, in a second place — FIXED
+
+**Found:** immediately after F-018, by the verifier again.
+
+`mandates.expires_at` was signed as `datetime.isoformat()` from Python but re-derived from
+PostgreSQL, which returns `TIMESTAMPTZ` in the **session timezone**. Signer and verifier
+produced different strings for the same instant, so every mandate read as tampered.
+
+Phase 3 had already fixed exactly this for `decision_records.created_at` — and the fix was
+applied to that one field rather than to the rule. **A datetime crossing a signature
+boundary must be normalised to UTC**, and the normalisation belongs in `build_payload`, not
+at each call site.
+
+Both canonicalisers now normalise. Pinned by a vector asserting that the same instant in two
+timezones produces identical bytes.
+
+---
+
+### F-020 — The verifier was read-only in name only — FIXED
+
+**Found:** by its own test, `test_the_verifier_cannot_write`, which did not raise.
+
+`conn.execute("SET default_transaction_read_only = on")` governs transactions started
+*after* it. Run as a statement, it left the transaction it ran in read-write — so the
+verifier could have written, and the docstring claiming otherwise was false.
+
+The whole value of an independent verifier is that its report does not depend on trusting
+the thing it verifies. "Chooses not to write" is a promise; "cannot write" is a property.
+
+**Fix:** passed as a connection option (`-c default_transaction_read_only=on`), so it
+applies from connection time. Asserted by a test that attempts a real INSERT.
+
+---
+
+### F-016 — extended, and generalised
+
+The Phase 3 fix covered `decision_records`. `mandates` was known-open. `policies` was found
+by looking for the pattern rather than waiting for the bug: it carried a `signature` with no
+statement of what it signed, so the column could only ever have been decorative.
+
+Now one helper and a registry (`dwaar/crypto/integrity.py`), iterated by the verifier, with
+the standing rule recorded in `docs/adr/0001-phase-1-2-decisions.md`: any table carrying both
+a signed serialisation and extracted columns must be registered, and its positive controls
+ship in the same commit as its check.
+
+`make verify` currently reports PASS across 1,005 chained records, 8 mandates and the ledger
+invariants — and FAILs, naming the row, on a mutation of any single column across all three
+tables.

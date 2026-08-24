@@ -38,6 +38,7 @@ from typing import Any
 from psycopg import AsyncConnection
 from psycopg.errors import UniqueViolation
 
+from dwaar import idempotency
 from dwaar.db.repositories.base import fetch_all, fetch_one
 from dwaar.errors import InsufficientBudget, LedgerError
 from dwaar.money import Paise
@@ -76,12 +77,18 @@ async def balance(conn: AsyncConnection, mandate_id: str) -> Paise:
 
 
 async def get_by_idempotency_key(
-    conn: AsyncConnection, idempotency_key: str
+    conn: AsyncConnection, mandate_id: str, idempotency_key: str
 ) -> dict[str, Any] | None:
+    """Look up a STORED (already namespaced) key, scoped to its mandate.
+
+    Mandate-scoped, not global: a global lookup would let one agent observe and collide
+    with another agent's key on an unrelated mandate.
+    """
     return await fetch_one(
         conn,
-        f"SELECT {_COLUMNS} FROM budget_ledger WHERE idempotency_key = %s",
-        (idempotency_key,),
+        f"SELECT {_COLUMNS} FROM budget_ledger "
+        f"WHERE mandate_id = %s AND idempotency_key = %s",
+        (mandate_id, idempotency_key),
     )
 
 
@@ -117,7 +124,7 @@ async def _append(
     # webhook on the ordinary path rather than the exception path. The exception path
     # below still matters, because idempotency_key is globally unique and two different
     # mandates can collide on one, where no mandate lock helps.
-    duplicate = await get_by_idempotency_key(conn, idempotency_key)
+    duplicate = await get_by_idempotency_key(conn, mandate_id, idempotency_key)
     if duplicate is not None:
         return ReserveResult(
             entry_id=duplicate["entry_id"],
@@ -183,7 +190,7 @@ async def _append(
         # Idempotency key collision: another connection committed this key between our
         # pre-check and our insert. The transaction is still usable because of the
         # savepoint, so the winning entry can be read and returned.
-        winner = await get_by_idempotency_key(conn, idempotency_key)
+        winner = await get_by_idempotency_key(conn, mandate_id, idempotency_key)
         if winner is None:
             raise
         return ReserveResult(
@@ -217,7 +224,12 @@ async def reserve(
     if amount_paise <= 0:
         raise ValueError(f"reserve amount must be positive, got {amount_paise}")
 
-    existing = await get_by_idempotency_key(conn, idempotency_key)
+    # The agent's key is ALWAYS prefixed before it touches storage. Without this an agent
+    # could submit "release:1234" and silently no-op the real release of entry 1234,
+    # leaking that reservation permanently. See dwaar/idempotency.py.
+    stored_key = idempotency.reserve_key(idempotency_key)
+
+    existing = await get_by_idempotency_key(conn, mandate_id, stored_key)
     if existing is not None:
         return ReserveResult(
             entry_id=existing["entry_id"],
@@ -232,7 +244,7 @@ async def reserve(
         conn,
         mandate_id=mandate_id,
         delta_paise=-amount_paise,
-        idempotency_key=idempotency_key,
+        idempotency_key=stored_key,
         reason=reason,
     )
 
@@ -242,10 +254,13 @@ async def release(
     *,
     mandate_id: str,
     amount_paise: Paise,
-    idempotency_key: str,
+    reserve_entry_id: int,
     reason: str = "release",
 ) -> ReserveResult:
     """Release a held reservation with a **compensating entry**, never an UPDATE.
+
+    The key is derived from ``reserve_entry_id`` rather than supplied by the caller, which
+    makes a duplicate release idempotent for free.
 
     The app role holds no UPDATE on this table, so this is the only way it could be done —
     which is deliberate. Editing the reserving row would break ``balance == sum(deltas)``
@@ -254,7 +269,11 @@ async def release(
     if amount_paise <= 0:
         raise ValueError(f"release amount must be positive, got {amount_paise}")
 
-    existing = await get_by_idempotency_key(conn, idempotency_key)
+    # Derived from the entry being reversed, never supplied. Releasing the same
+    # reservation twice therefore collides and is absorbed instead of double-crediting.
+    stored_key = idempotency.release_key(reserve_entry_id)
+
+    existing = await get_by_idempotency_key(conn, mandate_id, stored_key)
     if existing is not None:
         return ReserveResult(
             entry_id=existing["entry_id"],
@@ -267,7 +286,7 @@ async def release(
         conn,
         mandate_id=mandate_id,
         delta_paise=amount_paise,
-        idempotency_key=idempotency_key,
+        idempotency_key=stored_key,
         reason=reason,
     )
 

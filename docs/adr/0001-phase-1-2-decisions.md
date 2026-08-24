@@ -283,3 +283,45 @@ are exactly those rows. The `idempotency_key = 'genesis:' || mandate_id` uniquen
 from Q3 is what prevents two genesis rows for one mandate, so the guarantee holds — but
 it holds via a different constraint than the tripwire, and that is worth knowing when
 reading a failure.
+
+---
+
+## Standing requirement, added 2026-08-24 (Phase 4)
+
+### Any table with both a signed serialisation and extracted columns must be registered in `dwaar/crypto/integrity.py`
+
+The same defect was found three times:
+
+| Table | Found as | The tamper that verified clean |
+|---|---|---|
+| `mandates` | F-013 residual | `UPDATE mandates SET expires_at = now() + interval '100 years'` |
+| `decision_records` | F-016 | `UPDATE decision_records SET amount_paise = 500000` — demo beat 6 |
+| `policies` | by generalising | `UPDATE policies SET compiled_rules = '{}'` |
+
+Each has the same shape. The signature attests to a **blob**; the application, the console,
+the hot path and every query read the **columns**. When the two can diverge undetected, the
+signature protects a shadow copy nobody reads, and the audit trail is decorative.
+
+Three instances is a bug class, not three bugs. So:
+
+1. `dwaar/crypto/integrity.py` holds one helper, `assert_columns_match_canonical(row, check)`,
+   and a `REGISTRY` of `IntegrityCheck` entries.
+2. The verifier iterates the registry. **Registering a table is what makes it checked.**
+3. `tests/crypto/test_integrity.py` asserts the registry covers every table that carries a
+   canonical-form column, so forgetting one fails the build rather than passing silently.
+4. Its positive controls ship **in the same commit as the helper**, one per signed field —
+   because a check that only ever passes is indistinguishable from a check that cannot fail.
+
+New table with a signed blob → add an `IntegrityCheck`, add its per-field tamper tests.
+
+### Every test that asserts an ABSENCE must have a positive control
+
+**A check whose job is to never fail cannot be validated by never failing.** Its silence is
+indistinguishable between "nothing to find" and "cannot find anything".
+
+F-014 was exactly this: the import walker could not see `from X import Y` submodule imports,
+so rule 1 and rule 3 were both green while enforcing nothing. The positive control caught it
+on its first run.
+
+`tests/test_absence_controls.py` is the audit. Adding a guard that asserts an absence means
+adding its control there — a synthetic input that the guard must reject.

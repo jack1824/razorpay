@@ -14,7 +14,8 @@ import psycopg
 import pytest
 from psycopg.errors import UniqueViolation
 
-from dwaar.db.repositories import budget_ledger, mandates
+from dwaar import idempotency
+from dwaar.db.repositories import budget_ledger
 
 pytestmark = pytest.mark.db
 
@@ -140,7 +141,7 @@ async def test_genesis_key_prevents_double_initialisation(owner_dsn, committed_m
                         mandate_id,
                         10_000_000,
                         20_000_000,
-                        mandates.genesis_key(mandate_id),
+                        idempotency.genesis_key(mandate_id),
                         "mandate_created",
                     ),
                 )
@@ -163,7 +164,7 @@ async def test_release_is_a_compensating_entry_not_an_edit(app_dsn, committed_ma
             conn,
             mandate_id=mandate_id,
             amount_paise=75_000,
-            idempotency_key=f"rel-rel-{mandate_id}",
+            reserve_entry_id=reserved.entry_id,
         )
         await conn.commit()
 

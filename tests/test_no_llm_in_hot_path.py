@@ -19,7 +19,10 @@ import pytest
 
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
+from dwaar.crypto import http_sig
+from dwaar.crypto import keys as keymod
 from dwaar.metrics import llm_calls_in_hot_path
+from tests.conftest import AGENT_SEED
 
 pytestmark = pytest.mark.db
 
@@ -44,7 +47,7 @@ def exploding_llm(monkeypatch):
 
 
 async def test_authorize_never_calls_the_llm(
-    app_dsn, owner_dsn, make_mandate, signer, exploding_llm, settings
+    app_dsn, owner_dsn, make_mandate, signer, exploding_llm, settings, nonce_store
 ):
     """1,000 authorize calls, mixed outcomes, zero LLM invocations."""
     import psycopg
@@ -72,18 +75,36 @@ async def test_authorize_never_calls_the_llm(
             else:
                 amount, category = 1_000, "groceries"        # allowed
 
+            import json as _json
+            import time as _time
+            import uuid as _uuid
+
+            request = AuthorizeRequest(
+                agent_id=mandate["agent_id"],
+                mandate_id=mandate["mandate_id"],
+                action="purchase",
+                amount_paise=amount,
+                idempotency_key=f"nollm-{i:06d}-{'x' * 8}",
+                category=category,
+            )
+            body = _json.dumps(
+                {
+                    "agent_id": request.agent_id, "mandate_id": request.mandate_id,
+                    "action": request.action, "amount_paise": request.amount_paise,
+                    "idempotency_key": request.idempotency_key,
+                    "category": request.category,
+                },
+                separators=(",", ":"),
+            ).encode()
+            private = keymod.derive_private_key(AGENT_SEED, "agent", request.agent_id)
+            headers = http_sig.sign_request(
+                private, method="POST", path="/v1/authorize", body=body,
+                keyid=request.agent_id, created=int(_time.time()),
+                nonce=_uuid.uuid4().hex,
+            )
             outcome = await pipeline.authorize(
-                AuthorizeRequest(
-                    agent_id=mandate["agent_id"],
-                    mandate_id=mandate["mandate_id"],
-                    action="purchase",
-                    amount_paise=amount,
-                    idempotency_key=f"nollm-{i:06d}-{'x' * 8}",
-                    category=category,
-                ),
-                conn=conn,
-                signer=signer,
-                settings=settings,
+                request, conn=conn, signer=signer, settings=settings,
+                headers=headers, body=body, nonce_store=nonce_store,
             )
             decisions.add(outcome.decision.decision)
             await conn.commit()

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from psycopg_pool import AsyncConnectionPool
+from redis.asyncio import Redis
 
 from dwaar import __version__
 from dwaar.api.middleware import BodySizeLimitMiddleware, TraceIDMiddleware
@@ -22,6 +23,7 @@ from dwaar.api.routes import authorize, health
 from dwaar.config import Settings, get_settings
 from dwaar.crypto.signer import derive_signer, ensure_registered
 from dwaar.logging import configure_logging, get_logger
+from dwaar.nonce import RedisNonceStore
 
 log = get_logger("dwaar.api")
 
@@ -60,11 +62,18 @@ async def lifespan(app: FastAPI):
         # registered key. Startup stays up so /health can report the condition.
         log.error("signing_key_registration_failed", error_type=type(exc).__name__)
 
+    # Replay defence. Fails CLOSED if unreachable — see dwaar/nonce.py: we cannot tell a
+    # first use from a replay, and guessing would be fail-open on identity.
+    redis = Redis.from_url(settings.redis_url)
+    app.state.redis = redis
+    app.state.nonce_store = RedisNonceStore(redis)
+
     log.info("startup", version=__version__, component="api")
     try:
         yield
     finally:
         await pool.close()
+        await redis.aclose()
         log.info("shutdown", component="api")
 
 

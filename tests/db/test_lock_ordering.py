@@ -23,10 +23,38 @@ import pytest
 
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
+from dwaar.crypto import http_sig
+from dwaar.crypto import keys as keymod
 from dwaar.crypto.signer import ensure_registered
-from tests.conftest import rand_id
+from tests.conftest import AGENT_SEED, rand_id
 
 pytestmark = pytest.mark.db
+
+
+def _signed(mandate, key: str):
+    """One signed request. Signing happens outside the contended region on purpose."""
+    import json
+    import time
+    import uuid
+
+    request = AuthorizeRequest(
+        agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
+        action="purchase", amount_paise=1_000, idempotency_key=key, category="groceries",
+    )
+    body = json.dumps(
+        {
+            "agent_id": request.agent_id, "mandate_id": request.mandate_id,
+            "action": request.action, "amount_paise": request.amount_paise,
+            "idempotency_key": request.idempotency_key, "category": request.category,
+        },
+        separators=(",", ":"),
+    ).encode()
+    private = keymod.derive_private_key(AGENT_SEED, "agent", request.agent_id)
+    headers = http_sig.sign_request(
+        private, method="POST", path="/v1/authorize", body=body,
+        keyid=request.agent_id, created=int(time.time()), nonce=uuid.uuid4().hex,
+    )
+    return request, headers, body
 
 
 @pytest.fixture
@@ -129,7 +157,7 @@ async def test_inverting_the_order_actually_deadlocks(app_dsn, locked_scenario):
 
 
 async def test_concurrent_pipeline_runs_never_deadlock(
-    app_dsn, owner_dsn, locked_scenario, signer, settings
+    app_dsn, owner_dsn, locked_scenario, signer, settings, nonce_store
 ):
     """The invariant paying off: 30 concurrent requests, one mandate, one merchant.
 
@@ -143,13 +171,10 @@ async def test_concurrent_pipeline_runs_never_deadlock(
                 await conn.set_autocommit(False)
                 async with conn.cursor() as cur:
                     await cur.execute("SET lock_timeout = '10s'")
+                request, headers, body = _signed(mandate, f"lock-{i:04d}-{'x' * 8}")
                 await pipeline.authorize(
-                    AuthorizeRequest(
-                        agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
-                        action="purchase", amount_paise=1_000,
-                        idempotency_key=f"lock-{i:04d}-{'x' * 8}", category="groceries",
-                    ),
-                    conn=conn, signer=signer, settings=settings,
+                    request, conn=conn, signer=signer, settings=settings,
+                    headers=headers, body=body, nonce_store=nonce_store,
                 )
                 await conn.commit()
                 return "ok"

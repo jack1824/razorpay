@@ -1,15 +1,15 @@
 """Latency gates, in CI, from day 3.
 
 The strategy package puts this on day 12. That is far too late: discovering we are at
-300ms on day 11 is how this project dies, because by then the pipeline has eight stages
-and no one knows which one did it.
+300ms on day 11 is how this project dies, because by then the pipeline has nine stages and
+no one knows which one did it.
 
 **Two gates, deliberately asymmetric:**
 
     pipeline p99 < 25ms    TIGHT. Measured in-process, excluding HTTP framing and network.
-                           This is what the stage budgets in ARCHITECTURE.md actually sum
-                           to, and it is the number the pitch may quote — with that clause
-                           attached, every time.
+                           This is what the stage budgets in ARCHITECTURE.md sum to, and it
+                           is the number the pitch may quote — with that clause attached,
+                           every time.
 
     HTTP p99 < 150ms       LOOSE. Cannot flake on shared-runner variance, but catches a
                            catastrophic regression — a blocking call in middleware, a
@@ -19,28 +19,67 @@ Gating only the pipeline would let a blocking call in middleware sail through. G
 tightly would flake on a noisy runner, and a flaky gate gets disabled, which returns us to
 discovering 300ms on day 11. Hence one of each.
 
-Real HTTP p99 is also printed as a non-gating number so variance data accumulates before
-anyone tightens it.
+**Requests are signed outside every timed region.** Ed25519 signing is the *agent's* cost,
+not the gateway's; folding it in would inflate a number we then quote as ours. Signature
+*verification* is inside, because stage 1 is inside.
 """
 
 from __future__ import annotations
 
+import json
 import statistics
 import time
+import uuid
 
 import psycopg
 import pytest
 
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
+from dwaar.crypto import http_sig
+from dwaar.crypto import keys as keymod
 from dwaar.crypto.signer import ensure_registered
-from tests.conftest import rand_id
+from tests.conftest import AGENT_SEED, REDIS_URL, rand_id
 
 pytestmark = pytest.mark.db
 
 REQUESTS = 1_000
 PIPELINE_P99_BUDGET_MS = 25.0
 HTTP_P99_GUARD_RAIL_MS = 150.0
+
+
+def _signed(mandate, key: str):
+    """Build one signed request. Called outside timed regions on purpose."""
+    request = AuthorizeRequest(
+        agent_id=mandate["agent_id"],
+        mandate_id=mandate["mandate_id"],
+        action="purchase",
+        amount_paise=1_000,
+        idempotency_key=key,
+        category="groceries",
+    )
+    body = json.dumps(
+        {
+            "agent_id": request.agent_id,
+            "mandate_id": request.mandate_id,
+            "action": request.action,
+            "amount_paise": request.amount_paise,
+            "idempotency_key": request.idempotency_key,
+            "category": request.category,
+        },
+        separators=(",", ":"),
+    ).encode()
+    private = keymod.derive_private_key(AGENT_SEED, "agent", request.agent_id)
+    headers = http_sig.sign_request(
+        private,
+        method="POST",
+        path="/v1/authorize",
+        body=body,
+        keyid=request.agent_id,
+        created=int(time.time()),
+        nonce=uuid.uuid4().hex,
+    )
+    return request, headers, body
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -65,8 +104,10 @@ async def bench_mandate(owner_dsn, make_mandate, signer):
     merchant = rand_id("mch")
     setup = await psycopg.AsyncConnection.connect(owner_dsn)
     mandate = await make_mandate(
-        setup, merchant_id=merchant,
-        max_total_paise=10_000_000_000, max_per_txn_paise=500_000,
+        setup,
+        merchant_id=merchant,
+        max_total_paise=10_000_000_000,
+        max_per_txn_paise=500_000,
     )
     await ensure_registered(setup, signer)
     await setup.commit()
@@ -89,33 +130,29 @@ async def bench_mandate(owner_dsn, make_mandate, signer):
     await cleanup.close()
 
 
-async def test_pipeline_p99_under_25ms(app_dsn, bench_mandate, signer, settings, capsys):
+async def test_pipeline_p99_under_25ms(
+    app_dsn, bench_mandate, signer, settings, nonce_store, capsys
+):
     """THE gate. 1,000 requests through the full pipeline including the chain write."""
-    merchant, mandate = bench_mandate
+    _merchant, mandate = bench_mandate
+    warmup = [_signed(mandate, f"warm-{i:04d}-{'x' * 8}") for i in range(20)]
+    prepared = [_signed(mandate, f"bench-{i:06d}-{'x' * 8}") for i in range(REQUESTS)]
     samples: list[float] = []
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         # Warm the pool, the prepared statements and the chain tail before measuring.
-        for i in range(20):
+        for request, headers, body in warmup:
             await pipeline.authorize(
-                AuthorizeRequest(
-                    agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
-                    action="purchase", amount_paise=1_000,
-                    idempotency_key=f"warm-{i:04d}-{'x' * 8}", category="groceries",
-                ),
-                conn=conn, signer=signer, settings=settings,
+                request, conn=conn, signer=signer, settings=settings,
+                headers=headers, body=body, nonce_store=nonce_store,
             )
             await conn.commit()
 
-        for i in range(REQUESTS):
-            request = AuthorizeRequest(
-                agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
-                action="purchase", amount_paise=1_000,
-                idempotency_key=f"bench-{i:06d}-{'x' * 8}", category="groceries",
-            )
+        for request, headers, body in prepared:
             started = time.perf_counter()
             await pipeline.authorize(
-                request, conn=conn, signer=signer, settings=settings
+                request, conn=conn, signer=signer, settings=settings,
+                headers=headers, body=body, nonce_store=nonce_store,
             )
             await conn.commit()
             samples.append((time.perf_counter() - started) * 1000)
@@ -131,24 +168,23 @@ async def test_pipeline_p99_under_25ms(app_dsn, bench_mandate, signer, settings,
     )
 
 
-async def test_no_single_stage_dominates(app_dsn, bench_mandate, signer, settings, capsys):
+async def test_no_single_stage_dominates(
+    app_dsn, bench_mandate, signer, settings, nonce_store, capsys
+):
     """The stage split exists to make a regression attributable, so assert it stays so.
 
-    A p99 that passes while one stage eats 90% of it is a p99 that will fail next week for
+    A p99 that passes while one stage eats most of it is a p99 that will fail next week for
     a reason nobody can locate.
     """
-    merchant, mandate = bench_mandate
+    _merchant, mandate = bench_mandate
+    prepared = [_signed(mandate, f"stage-{i:05d}-{'x' * 8}") for i in range(200)]
     per_stage: dict[str, list[int]] = {}
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        for i in range(200):
+        for request, headers, body in prepared:
             outcome = await pipeline.authorize(
-                AuthorizeRequest(
-                    agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
-                    action="purchase", amount_paise=1_000,
-                    idempotency_key=f"stage-{i:05d}-{'x' * 8}", category="groceries",
-                ),
-                conn=conn, signer=signer, settings=settings,
+                request, conn=conn, signer=signer, settings=settings,
+                headers=headers, body=body, nonce_store=nonce_store,
             )
             await conn.commit()
             for stage, micros in outcome.stage_timings_us.items():
@@ -157,8 +193,9 @@ async def test_no_single_stage_dominates(app_dsn, bench_mandate, signer, setting
     with capsys.disabled():
         print()
         for stage in pipeline.STAGE_ORDER:
-            values = per_stage[stage]
-            print(f"  {stage:<24} p99={percentile(values, 0.99) / 1000:7.3f}ms")
+            if stage in per_stage:
+                values = per_stage[stage]
+                print(f"  {stage:<24} p99={percentile(values, 0.99) / 1000:7.3f}ms")
 
     total_p99 = sum(percentile(v, 0.99) for v in per_stage.values())
     for stage, values in per_stage.items():
@@ -169,46 +206,49 @@ async def test_no_single_stage_dominates(app_dsn, bench_mandate, signer, setting
         )
 
 
-async def test_http_p99_guard_rail(app_dsn, migrate_dsn_for_http, bench_mandate, signer, capsys):
+async def test_http_p99_guard_rail(app_dsn, migrate_dsn_for_http, bench_mandate, capsys):
     """LOOSE, on purpose.
 
     A tight HTTP gate flakes on shared-runner variance, and a flaky gate gets disabled.
-    This one only catches catastrophe: a blocking call in middleware, a connection opened
-    per request, a sync driver sneaking in. The real p99 is printed so variance data
-    accumulates before anyone tightens it.
+    This one only catches catastrophe. The real p99 is printed so variance data accumulates
+    before anyone tightens it.
     """
     from fastapi.testclient import TestClient
 
     from dwaar.api.app import create_app
     from dwaar.config import Settings
 
-    merchant, mandate = bench_mandate
+    _merchant, mandate = bench_mandate
     # LOG_LEVEL=WARNING deliberately: 300 JSON log lines emitted inside the measurement
     # would be a confound, not just noise.
     app = create_app(
         Settings(
             DATABASE_URL_APP=app_dsn,
             DATABASE_URL_MIGRATE=migrate_dsn_for_http,
+            REDIS_URL=REDIS_URL,
             LOG_LEVEL="WARNING",
         )
     )
 
+    warm = [_signed(mandate, f"httpwarm-{i:04d}-{'x' * 8}") for i in range(50)]
+    measured = [_signed(mandate, f"http-{i:05d}-{'x' * 8}") for i in range(300)]
     samples: list[float] = []
-    with TestClient(app) as client:
-        for i in range(50):
-            client.post("/v1/authorize", json={
-                "agent_id": mandate["agent_id"], "mandate_id": mandate["mandate_id"],
-                "action": "purchase", "amount_paise": 1_000,
-                "idempotency_key": f"httpwarm-{i:04d}-{'x' * 8}", "category": "groceries",
-            })
 
-        for i in range(300):
+    with TestClient(app) as client:
+        for _request, headers, body in warm:
+            client.post(
+                "/v1/authorize",
+                content=body,
+                headers={**headers, "Content-Type": "application/json"},
+            )
+
+        for _request, headers, body in measured:
             started = time.perf_counter()
-            response = client.post("/v1/authorize", json={
-                "agent_id": mandate["agent_id"], "mandate_id": mandate["mandate_id"],
-                "action": "purchase", "amount_paise": 1_000,
-                "idempotency_key": f"http-{i:05d}-{'x' * 8}", "category": "groceries",
-            })
+            response = client.post(
+                "/v1/authorize",
+                content=body,
+                headers={**headers, "Content-Type": "application/json"},
+            )
             samples.append((time.perf_counter() - started) * 1000)
             assert response.status_code == 200, response.text
 
@@ -225,7 +265,7 @@ async def test_http_p99_guard_rail(app_dsn, migrate_dsn_for_http, bench_mandate,
 
 
 async def test_recorded_latency_is_less_than_measured_total(
-    app_dsn, bench_mandate, signer, settings
+    app_dsn, bench_mandate, signer, settings, nonce_store
 ):
     """`decision_records.latency_us` excludes its own INSERT, and must say so honestly.
 
@@ -235,16 +275,14 @@ async def test_recorded_latency_is_less_than_measured_total(
     """
     from dwaar.db.repositories import decision_records
 
-    merchant, mandate = bench_mandate
+    _merchant, mandate = bench_mandate
+    request, headers, body = _signed(mandate, f"honest-{rand_id('x')}-xxxxxxxx")
+
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         started = time.perf_counter()
         outcome = await pipeline.authorize(
-            AuthorizeRequest(
-                agent_id=mandate["agent_id"], mandate_id=mandate["mandate_id"],
-                action="purchase", amount_paise=1_000,
-                idempotency_key=f"honest-{rand_id('x')}", category="groceries",
-            ),
-            conn=conn, signer=signer, settings=settings,
+            request, conn=conn, signer=signer, settings=settings,
+            headers=headers, body=body, nonce_store=nonce_store,
         )
         measured_us = (time.perf_counter() - started) * 1_000_000
         await conn.commit()

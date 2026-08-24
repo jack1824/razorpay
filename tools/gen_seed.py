@@ -127,7 +127,7 @@ def build(seed: int, keys_dir: Path | None) -> dict[str, list]:
             allow_categories=ALLOW_CATEGORIES,
             deny_categories=DENY_CATEGORIES,
             substitution_tolerance="same_price",
-            expires_at=(EPOCH + timedelta(days=30)).isoformat(),
+            expires_at=EPOCH + timedelta(days=30),
             nonce=hashlib.sha256(f"{mandate_id}{seed}".encode()).hexdigest()[:24],
         )
         canonical = mandatemod.canonical_json(payload)

@@ -28,10 +28,10 @@ from dwaar.authorize.stages import (
     signature,
 )
 from dwaar.authorize.types import AuthorizeRequest
-from dwaar.config import Settings
 
-STUB_MODULES = [signature, features, risk, policy]
-REAL_MODULES = [mandate, authority, ledger, decision, record]
+STUB_MODULES = [features, risk, policy]
+# signature became REAL on 25 Aug: `signature_unverified` no longer appears on any record.
+REAL_MODULES = [signature, mandate, authority, ledger, decision, record]
 
 REQ = AuthorizeRequest(
     agent_id="agt_000000000001",
@@ -49,9 +49,14 @@ def test_every_stage_has_a_name():
 
 
 def test_stage_order_covers_every_stage_module():
-    """The registry and the modules cannot drift apart."""
+    """The registry and the modules cannot drift apart.
+
+    `replay_lookup` is in STAGE_ORDER without a module: it is a short-circuit that runs
+    before the work rather than a stage of it, but it is timed like one so a slow replay
+    lookup shows up in the same place as everything else.
+    """
     named = {m.STAGE_NAME for m in STUB_MODULES + REAL_MODULES}
-    assert set(pipeline.STAGE_ORDER) == named
+    assert set(pipeline.STAGE_ORDER) - {pipeline.REPLAY_STAGE} == named
 
 
 @pytest.mark.parametrize("module", STUB_MODULES, ids=lambda m: m.__name__.split(".")[-1])
@@ -81,23 +86,15 @@ def test_every_stub_documents_its_contract(module):
     assert module.DEGRADED_TOKEN in doc
 
 
-async def test_signature_stub_returns_its_documented_constant():
-    result = await signature.verify_signature(REQ, {}, settings=Settings(DWAAR_ENV="local"))
-    assert result.ok is True
-    assert result.agent_id == REQ.agent_id
-    assert result.degraded == signature.DEGRADED_TOKEN
+def test_no_stage_still_claims_to_be_an_unverified_signature():
+    """Stage 1 is real. The token must be gone from the registry, not merely unused.
 
-
-async def test_signature_stub_refuses_to_run_outside_local():
-    """The most important line in the stub layer.
-
-    A stubbed authentication check that silently passes is not a degraded control, it is
-    no control — and nothing about a green test suite would reveal it. This makes the
-    failure a loud startup error instead of a silently unauthenticated gateway.
+    A leftover token would put `signature_unverified` on records produced by a gateway that
+    genuinely verifies — a degradation claimed that never happened, which is as dishonest as
+    a stub that declares nothing.
     """
-    for env in ("staging", "production", "demo"):
-        with pytest.raises(RuntimeError, match="refuses to run"):
-            await signature.verify_signature(REQ, {}, settings=Settings(DWAAR_ENV=env))
+    assert "signature_unverified" not in pipeline.STUB_STAGES.values()
+    assert not hasattr(signature, "DEGRADED_TOKEN")
 
 
 async def test_features_stub_returns_empty_and_says_so():
