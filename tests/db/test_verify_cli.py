@@ -24,9 +24,19 @@ from dwaar.authorize.types import AuthorizeRequest
 from dwaar.crypto import http_sig
 from dwaar.crypto import keys as keymod
 from dwaar.crypto.signer import ensure_registered
+
+#: A REAL detector, so the record under test is a COMPLETE one.
+#:
+#: Migration 0014 constrains `injection_flag` to agree with `stages_executed`, so a
+#: record written without a detector carries NULL — and the tamper case that flips the
+#: flag to `true` would then be refused by the constraint rather than by the verifier.
+#: A tamper test blocked before it happens proves nothing about detection.
+from dwaar.risk import injection as _injection
 from dwaar.verify_cli import main as verify_main
 from dwaar.verify_cli import verify
 from tests.conftest import AGENT_SEED, rand_id
+
+DETECTOR = _injection.load()
 
 pytestmark = pytest.mark.db
 
@@ -56,7 +66,7 @@ async def chained(owner_dsn, app_dsn, make_mandate, signer, settings, nonce_stor
             )
             await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
-                headers=headers, body=body, nonce_store=nonce_store,
+                headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
             )
             await conn.commit()
 
@@ -122,7 +132,17 @@ async def test_the_cli_exits_zero_when_clean(app_dsn, chained, capsys):
         ("injection_flag", "true"),
         ("policy_version", "99"),
         ("merchant_id", "'mch_elsewhere'"),
-        ("stages_executed", "ARRAY['nothing']"),
+        # Note the `detect_injection` entry. Migration 0014 constrains `injection_flag` to
+        # agree with `stages_executed`, so `ARRAY['nothing']` is refused by the DATABASE
+        # before the verifier ever sees it — and a tamper blocked before it happens proves
+        # nothing about detection.
+        #
+        # That is worth stating rather than working around quietly: a CHECK constraint is a
+        # second, weaker control that narrows the space of forgeries an attacker with
+        # UPDATE but not DDL can produce. It does not replace the chain, because a superuser
+        # can drop it — but dropping it is itself a visible act, and the chain still catches
+        # every forgery that remains inside it. This case is one of those.
+        ("stages_executed", "ARRAY['nothing','detect_injection']"),
         ("degraded_mode", "ARRAY[]::text[]"),
     ],
 )

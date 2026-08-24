@@ -121,6 +121,7 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
                 policy_store=app.state.policy_store,
                 observation_store=app.state.observation_store,
                 scorer=app.state.scorer,
+                detector=app.state.detector,
             )
         except pipeline.Unauthenticated:
             await conn.rollback()

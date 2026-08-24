@@ -25,6 +25,7 @@ from dwaar.authorize.stages import (
     authority,
     decision,
     features,
+    injection,
     ledger,
     mandate,
     policy,
@@ -41,7 +42,8 @@ STUB_MODULES: list = []
 
 #: `signature` became real on 25 Aug, `policy` on 26 Aug, `features` and `risk` on 27 Aug.
 REAL_MODULES = [
-    signature, mandate, authority, features, risk, policy, ledger, decision, record,
+    signature, mandate, authority, features, injection, risk, policy, ledger, decision,
+    record,
 ]
 
 #: Tokens that meant "this component does not exist". None of them may ever appear on a

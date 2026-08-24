@@ -423,3 +423,53 @@ labels, held out by someone with no stake in the result. Failing that, a shadow 
 where the model scores but never decides, compared against the outcomes the deterministic
 layer produced. Neither is available in a nine-day build, and neither is a reason to pretend
 the synthetic numbers are something they are not.
+
+---
+
+### The part of this that is not a concession but a finding
+
+Everything above is the answer to *"your data is synthetic."* This is the answer to the
+sharper follow-up, which is *"so how would you even know?"*
+
+Twice, the evaluation was measuring the generator rather than the behaviour. Both times the
+code was correct, both times the number was computed at run time from real data, and both
+times the number meant something other than what its label said.
+
+**The anomaly score was a quantile wearing a model's clothes.** An isolation forest produces
+a score on an arbitrary scale, so it has to be mapped into [0, 1] before a band can be drawn
+on it. The obvious mapping is percentile rank among known-legitimate traffic — a sentence a
+person can read. It is also *uniform on the population it was fitted to*, so it places
+exactly 20% of legitimate traffic above a 0.80 threshold no matter how good the forest is.
+Measured: 25%. Reported as an accuracy result, that number would have been a fact about
+arithmetic, not about detection. One third of legitimate agents would have been denied on
+stage.
+
+**A feature carrying 74% of the model's gain was a fact about how the agents were coded.**
+Every adversarial archetype held one cart identifier for its whole run, because that is how
+each was written; the legitimate shopper rotated per session, because that is what a shopper
+does. `cart_mutation_rate` became a near-direct readout of *which class the author had
+written*. It was not behaviour. It was a placeholder that happened to differ per class.
+
+**Neither was caught by an automated check, and one of them cannot be.** There is a leakage
+gate — Cramér's V per feature against the archetype, and the trainer refuses to build a model
+if any single feature exceeds the threshold. It works, and it did not fire: the cart feature
+passed at 0.625 against a threshold of 0.75. That is the gate doing its job. It is built to
+catch a feature that **is** the label, and this one merely correlated strongly with how the
+generator was written.
+
+**A leakage threshold catches a feature that is the label. It does not catch a feature that
+correlates with how the generator was written, and no automated check will** — because the
+check would have to know which of the differences between two classes were intended and which
+were incidental, and that is the question the author is answering, not a property of the data.
+
+So the control is a person reading the ranked importances after every retrain. That is not
+automatable and it is not being claimed as rigour. What can be forced is the number being in
+front of whoever is looking, so `make eval` prints the top ten importances on every run, and
+a single feature above roughly 40% of total gain is treated as a generator artifact until
+someone explains why it is not.
+
+**The honest position, stated plainly: some almost certainly remain.** Two were found by
+reading a table and asking why one number was large. There is no reason to believe that
+process is exhaustive, and every number in this project that describes the *model* should be
+read with that in mind. The numbers that describe the *system* — the ones in the table above —
+do not depend on it, which is why they are the ones offered without qualification.

@@ -34,7 +34,12 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from dwaar.authorize.types import AuthorizeRequest, PolicyResult, RiskResult
+from dwaar.authorize.types import (
+    AuthorizeRequest,
+    InjectionResult,
+    PolicyResult,
+    RiskResult,
+)
 from dwaar.policy import baseline, engine
 from dwaar.policy.store import NO_COMPILED_POLICY, PolicyStore
 
@@ -62,6 +67,7 @@ async def evaluate_policy(
     budget_remaining_paise: int | None = None,
     agent_verified: bool | None = None,
     features: dict[str, Any] | None = None,
+    injection: InjectionResult | None = None,
 ) -> PolicyResult:
     live = await store.get(conn, merchant_id)
 
@@ -70,7 +76,8 @@ async def evaluate_policy(
         mandate=mandate,
         budget_remaining_paise=budget_remaining_paise,
         risk_score=risk.risk_score if risk else None,
-        injection_flag=risk.injection_flag if risk else False,
+        injection_flag=injection.flagged if injection else None,
+        injection_checked=injection is not None and injection.flagged is not None,
         agent_verified=agent_verified,
         features=features,
     )

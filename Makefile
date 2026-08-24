@@ -17,8 +17,14 @@ export DATABASE_URL_SUPERUSER ?= postgresql://postgres:postgres_pw@localhost:543
 # first's agents.
 TRAFFIC_SEED ?= 20260828
 
-.PHONY: help up down logs migrate bootstrap-local seed traffic train test test-db lint fmt \
-        verify eval demo clean
+# A DIFFERENT seed for evaluation traffic, so the agents measured are not the agents
+# trained on. Same seed would mean the eval reported the model's performance on identities
+# whose whole request stream it had already learned.
+EVAL_SEED ?= 20260901
+
+.PHONY: help up down logs migrate bootstrap-local seed traffic traffic-eval train \
+        train-injection \
+        test test-db lint fmt verify eval demo clean
 
 help:
 	@echo "Dwaar — authorization layer for AI agents that spend money"
@@ -28,8 +34,10 @@ help:
 	@echo "  make logs      tail api logs"
 	@echo "  make migrate   apply migrations as the owner role"
 	@echo "  make seed      regenerate data/seed/ + .keys/ (deterministic)"
-	@echo "  make traffic   run the agent zoo against a LOCAL gateway (needs it running)"
+	@echo "  make traffic       bootstrap traffic for TRAINING (gateway must run model-free)"
+	@echo "  make traffic-eval  evaluation traffic for MEASURING (gateway runs normally)"
 	@echo "  make train     train the risk model from decision_records + the run manifest"
+	@echo "  make train-injection   fit the injection detector's weights"
 	@echo "  make test      run the full test suite"
 	@echo "  make lint      ruff check"
 	@echo "  make fmt       ruff format"
@@ -37,8 +45,8 @@ help:
 	@echo "  make bootstrap-local   create roles + database on a NON-Docker PostgreSQL,"
 	@echo "                         so the DB suite can run without Docker"
 	@echo ""
-	@echo "  make verify    verify the decision chain      [day 4  — not implemented]"
-	@echo "  make eval      compute the evaluation table   [day 12 — not implemented]"
+	@echo "  make verify    verify the decision chain"
+	@echo "  make eval      the honest numbers (importances, components, FP cost)"
 	@echo "  make demo      drive the demo beats           [day 11 — not implemented]"
 
 up:
@@ -78,14 +86,36 @@ seed:
 # the serving distribution. Start the API first.
 #
 # Localhost only, enforced in zoo/base.py rather than here.
+# BOOTSTRAP traffic, for training. The gateway must be running with NO model loaded:
+#
+#     DWAAR_MODEL_DIR=/nonexistent uvicorn dwaar.api.app:app --port 8080
+#
+# A model in the loop decides which requests reach a card, so it decides what payment
+# outcomes exist, so it decides what `failure_ratio` looks like. Training on that is
+# circular and the trainer refuses it. See FAILURES.md F-031.
 traffic:
 	$(PY) -m zoo.run --legit 30 --card-tester 4 --budget-breacher 4 --injector 4 \
-	  --requests 40 --seed $(TRAFFIC_SEED)
+	  --requests 40 --seed $(TRAFFIC_SEED) \
+	  --out data/traffic/bootstrap-$(TRAFFIC_SEED).jsonl
+
+# EVAL traffic, for measuring. The gateway runs as it actually runs — model loaded,
+# enforcing. This is the system under test, and it is a different question from the one
+# `make traffic` answers.
+traffic-eval:
+	$(PY) -m zoo.run --legit 30 --card-tester 4 --budget-breacher 4 --injector 4 \
+	  --requests 40 --seed $(EVAL_SEED) \
+	  --out data/traffic/eval-$(EVAL_SEED).jsonl
 
 # Reads features from decision_records and labels from the run manifest — the two are never
 # in one process. Refuses to write a bundle if any single feature separates the archetypes.
 train:
 	$(PY) -m tools.train_risk --seed $(TRAFFIC_SEED)
+
+# The injection detector's weights. Fitted over composed templates with the benign side
+# drawn from the real product catalogue — including SKU9001, whose name opens with the
+# highest-signal injection token there is.
+train-injection:
+	$(PY) -m tools.train_injection --seed $(TRAFFIC_SEED)
 
 test:
 	$(PY) -m pytest -q
@@ -94,10 +124,10 @@ test-db:
 	$(PY) -m pytest -q -m db
 
 lint:
-	$(PY) -m ruff check dwaar tests scripts zoo tools
+	$(PY) -m ruff check dwaar tests scripts zoo tools eval
 
 fmt:
-	$(PY) -m ruff format dwaar tests scripts zoo tools
+	$(PY) -m ruff format dwaar tests scripts zoo tools eval
 
 clean:
 	$(COMPOSE) down -v
@@ -114,13 +144,14 @@ clean:
 verify:
 	$(PY) -m dwaar.verify_cli --dsn "$(DATABASE_URL_APP)"
 
+# The honest numbers. Reads decision_records joined to the zoo's run manifests; every
+# figure is computed at run time and labelled with what it actually measures.
+#
+# Prints the top-ten feature importances on EVERY run. That is not decoration: no automated
+# check can catch a feature that correlates with how the generator was written (F-030), so
+# the only control is a person reading the ranking, and the number goes in front of them.
 eval:
-	@echo "make eval — NOT IMPLEMENTED"
-	@echo ""
-	@echo "  Lands day 12 (docs/strategy/BUILD_PLAN.md). Depends on the risk model (day 7)"
-	@echo "  and the agent zoo (day 8), including the two held-out archetypes."
-	@echo "  Every number it prints will be computed at run time. Rule 4."
-	@exit 2
+	$(PY) -m eval.report
 
 demo:
 	@echo "make demo — NOT IMPLEMENTED"

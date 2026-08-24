@@ -129,6 +129,9 @@ verifier, a deterministic policy engine with an offline LLM compiler, and a live
 | Budget ledger — atomic, idempotent, 50-writer clean | ✅ |
 | Per-merchant hash chain with explicit `seq` allocation | ✅ |
 | Import isolation + hot-path purity + ground-truth isolation tests | ✅ |
+| Injection detector — structural features, SKU9001 allowed | ✅ |
+| `injection_flag` is a tristate: unchecked / clean / flagged | ✅ |
+| `make eval` — importances, components separately, false-positive cost | ✅ |
 | Behavioural features — Redis windows keyed on (agent, principal) | ✅ |
 | Risk model — LightGBM + isolation forest, ONNX, pre-warmed | ✅ |
 | Agent zoo — four archetypes, real signed HTTP, localhost only | ✅ |
@@ -136,7 +139,7 @@ verifier, a deterministic policy engine with an offline LLM compiler, and a live
 
 | Scheduled | Date |
 |---|---|
-| Held-out archetypes (separate session), injection detector, calibration | 28 Aug |
+| Held-out archetypes — separate session, see `zoo/HELD_OUT_SPEC.md` | 28 Aug |
 | Razorpay test mode + MCP proxy | 29 Aug |
 | Async explainer, `make demo`, remaining console panels | 30 Aug |
 | `make eval` + fraud baseline + first held-out run | 31 Aug |
@@ -147,6 +150,31 @@ the sleeper, Merkle anchoring (hash chain only), console screen 6.
 
 See **`DEFENSE.md`** for six decisions that are not obvious, each with the alternative it
 rejected and what it costs.
+
+## Reading the feature importances is a required step
+
+`make eval` prints the top ten on every run, and calls out any single feature above **40% of
+total gain**. That number is not a threshold that fails a build — it is a number put in front
+of whoever is looking, because the judgment behind it cannot be automated.
+
+The reason is a defect we found and could not have caught automatically. A feature carrying
+74% of the model's gain turned out to be a fact about how the *agents were written* rather
+than about how agents behave: every adversarial archetype held one cart identifier for its
+whole run because that is how each was coded, and the legitimate one rotated because that is
+what a shopper does.
+
+There is a leakage gate — Cramér's V per feature against the archetype, and the trainer
+refuses to build a model if any single feature crosses it. It did not fire, correctly: the
+cart feature passed at 0.625 against a threshold of 0.75.
+
+> **A leakage threshold catches a feature that IS the label. It does not catch a feature that
+> correlates with how the generator was written, and no automated check will** — the check
+> would have to know which differences between two classes were intended and which were
+> incidental, and that is the question the author is answering, not a property of the data.
+
+Treat any feature above 40% as a generator artifact until someone explains why it is not.
+`DEFENSE.md` entry 8 has the full account, including the honest conclusion that some almost
+certainly remain.
 
 ## Four things worth reading the code for
 

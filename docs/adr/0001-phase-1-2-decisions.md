@@ -459,3 +459,70 @@ justify it is the file being scanned. Per the rule above, the fix belongs at the
 fourth instance is impossible: `tests/_support/sourcescan.py` strips comments and docstrings —
 and deliberately **not** other string literals, because `open("ground_truth.json")` is a leak
 that lives inside one — and all four checks route through it.
+
+### 4. An enforcement system that generates its own training data suppresses its own evidence
+
+F-031, stated generally, because it will recur and it is not obvious.
+
+A model trained on one traffic run then denied 636 of the next run's 640 card-testing
+requests. Denied requests never reach a card. A card that is never presented never produces a
+decline. So the payment processor reported almost no outcomes for card testers, and
+`failure_ratio` — the feature that exists to describe card testing — came back near zero for
+card testers.
+
+**The system was suppressing the evidence of its own effectiveness.** Nothing failed. Both
+runs completed, both trained, and the second model's metrics would have looked fine. It was
+visible only by putting two runs' per-archetype decision counts side by side.
+
+The general form: **an intervention changes the distribution it is measured on.** It applies
+to anything downstream of a decision this system makes — payment outcomes, retry behaviour,
+which agents keep transacting at all — and it applies to every future retrain, threshold
+adjustment and evaluation refresh, not just to the first model.
+
+The rule that follows: **traffic used to measure or fit a control must be generated against a
+system that is not enforcing that control.** Concretely here, bootstrap traffic is generated
+with `DWAAR_MODEL_DIR` pointing at nothing, so only the deterministic layer decides.
+
+It is enforced rather than remembered. `decision_records.model_version` is non-null exactly
+when a model scored the request, so `tools/train_risk.py` refuses to train when any training
+row carries one — a fact the gateway recorded, not a promise the operator made. The escape
+hatch is explicit (`--allow-model-shaped`) and exists for the case where someone is
+deliberately retraining on production traffic and has accounted for the selection bias.
+
+This is the same shape as rules 1 and 3 above: the check is a property the data carries, not a
+step in a runbook.
+
+### 5. Correctness bugs and evaluation bugs are different, and only one of them announces itself
+
+Thirty-three defects across seven phases. Thirty of them were correctness bugs: the code did
+the wrong thing, and something — a test, a request, a verifier — said so.
+
+Three were not. F-029, F-030 and F-033 were cases where **the code worked, the number was
+computed at run time as rule 4 requires, and the number still meant something other than what
+its label claimed.** An inverted percentile rank that reports a quantile as a model score. A
+feature importance that describes the author rather than the agent. A latency gate that
+measures a pipeline with two stages short-circuited and reports 2.80ms for something that
+actually costs 5.66ms.
+
+None of the three had a failing test, because in each case there was nothing to fail. The
+quantity being computed was well-defined; it was the *mapping from quantity to claim* that was
+wrong, and that mapping lives in a label, a docstring and a slide rather than in code.
+
+Rule 4 says every number is computed at run time. That rules out fabrication. It does not rule
+out measuring the wrong thing, and this project now treats those as two separate properties
+with two separate controls:
+
+| Property | Control |
+|---|---|
+| the number is computed, not fabricated | rule 4; `make eval` and `make demo` exited non-zero until real |
+| the number measures what its label claims | assert the *conditions* the label presumes |
+
+The second column is the new one, and it is concrete rather than aspirational. The latency
+test asserts `STUB_STAGES` is empty and that every stage reports a non-zero duration, because
+a stage costing 0.000ms is either not running or not being timed and neither is acceptable in
+a figure we quote. The trainer asserts the training rows were not shaped by a model. The
+leakage report asserts it ran over enough rows to mean anything.
+
+Where the condition cannot be asserted — whether a feature's importance reflects behaviour or
+authorship — the number is printed on every run instead, because forcing it in front of a
+person is the only control that exists.

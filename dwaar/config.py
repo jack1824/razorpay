@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # nonsense rather than an error.
     model_dir: Path = Field(default=Path("models/risk"), alias="DWAAR_MODEL_DIR")
 
+    # The injection detector's fitted weights. Separate from `model_dir` because the two
+    # fail differently: a missing risk bundle disables scoring entirely, a missing weights
+    # file leaves the named rules running. One switch for both would hide that.
+    injection_dir: Path = Field(
+        default=Path("models/injection"), alias="DWAAR_INJECTION_DIR"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

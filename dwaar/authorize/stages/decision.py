@@ -16,6 +16,7 @@ from dwaar.authorize.types import (
     AuthorityResult,
     AuthorizeRequest,
     Decision,
+    InjectionResult,
     LedgerResult,
     MandateResult,
     PolicyResult,
@@ -39,6 +40,7 @@ def render_decision(
     signature: SignatureResult,
     mandate: MandateResult,
     authority: AuthorityResult,
+    injection: InjectionResult | None,
     risk: RiskResult | None,
     policy: PolicyResult | None,
     ledger: LedgerResult | None,
@@ -88,7 +90,7 @@ def render_decision(
             retry_after_ms=1000,
         )
 
-    if risk is not None and risk.injection_flag:
+    if injection is not None and injection.flagged:
         return Decision(
             decision="deny",
             reason_code=REASON_DENIED,

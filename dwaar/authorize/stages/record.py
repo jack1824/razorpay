@@ -38,6 +38,7 @@ from dwaar.authorize.types import (
     AuthorityResult,
     Decision,
     FeatureResult,
+    InjectionResult,
     LedgerResult,
     MandateResult,
     PolicyResult,
@@ -63,6 +64,7 @@ async def write_decision_record(
     mandate: MandateResult,
     authority: AuthorityResult,
     features: FeatureResult | None,
+    injection: InjectionResult | None,
     risk: RiskResult | None,
     policy: PolicyResult | None,
     ledger: LedgerResult | None,
@@ -100,7 +102,10 @@ async def write_decision_record(
         rule_fired=decision.rule_fired,
         risk_score=risk.risk_score if risk else None,
         model_version=risk.model_version if risk else None,
-        injection_flag=risk.injection_flag if risk else False,
+        # TRISTATE. `None` when stage 3.5 never ran, which is exactly when a gate denial
+        # short-circuited it. Migration 0014 constrains this to agree with
+        # `stages_executed`, so a record cannot claim a check it did not perform.
+        injection_flag=injection.flagged if injection else None,
         features=features.features if features else {},
         policy_version=policy.policy_version if policy else None,
         amount_paise=amount_paise,

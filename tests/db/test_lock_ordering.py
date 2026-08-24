@@ -26,7 +26,14 @@ from dwaar.authorize.types import AuthorizeRequest
 from dwaar.crypto import http_sig
 from dwaar.crypto import keys as keymod
 from dwaar.crypto.signer import ensure_registered
+
+#: The REAL detector. Needs no artifact and no session — eleven arithmetic
+#: features — so a test running without one would only be exercising the
+#: not-checked path, and every record it wrote would carry a NULL flag.
+from dwaar.risk import injection as _injection
 from tests.conftest import AGENT_SEED, rand_id
+
+DETECTOR = _injection.load()
 
 pytestmark = pytest.mark.db
 
@@ -174,7 +181,7 @@ async def test_concurrent_pipeline_runs_never_deadlock(
                 request, headers, body = _signed(mandate, f"lock-{i:04d}-{'x' * 8}")
                 await pipeline.authorize(
                     request, conn=conn, signer=signer, settings=settings,
-                    headers=headers, body=body, nonce_store=nonce_store,
+                    headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
                 )
                 await conn.commit()
                 return "ok"

@@ -71,6 +71,19 @@ def build(mandate, *, key=None, nonce=None, created=None, agent_id=None):
 
 
 async def verify(conn, mandate, settings, *, store=None, now=None, **kw):
+    """Sign at `now`, verify at `now`. One clock.
+
+    The stage previously read the caller's `now` for the key-rotation window and the wall
+    clock for signature skew, so a test could advance `now` to probe the rotation window
+    while signing in the present — a request from the future, stamped now — and both checks
+    would agree. They cannot both be right about the same request.
+
+    Now that the stage holds one clock, `created` defaults to `now`, which is also what
+    actually happens: a request made at time T is signed at time T. A test that wants to
+    probe skew passes `created` explicitly.
+    """
+    if now is not None:
+        kw.setdefault("created", int(now.timestamp()))
     request, headers, body = build(mandate, **kw)
     return await sig_stage.verify_signature(
         request, headers, settings=settings, conn=conn, body=body,
@@ -308,3 +321,31 @@ async def test_no_record_still_claims_an_unverified_signature(
         record = await decision_records.get(conn, outcome.record_id)
 
     assert "signature_unverified" not in record["degraded_mode"]
+
+
+async def test_the_stage_holds_exactly_one_clock(app_conn, scenario, settings):
+    """Positive control for the fix above: `now` must govern skew, not only rotation.
+
+    Without this, reverting the change is silent — every other test in this file signs at
+    `now`, so a stage that read the wall clock for skew would agree with all of them and
+    disagree only with a caller that advanced its clock by more than two minutes.
+    """
+    _merchant, mandate = scenario
+    far_future = datetime.now(UTC) + timedelta(hours=1)
+
+    # Signed for the wall clock, verified against a clock an hour ahead. If the stage were
+    # still reading `time.time()` for skew this would pass, because by the wall clock the
+    # signature is fresh.
+    stale = await verify(
+        app_conn, mandate, settings, store=InMemoryNonceStore(),
+        now=far_future, created=int(datetime.now(UTC).timestamp()),
+    )
+    assert stale.ok is False
+    assert "outside the" in (stale.internal_reason or ""), stale.internal_reason
+
+    # And the same request signed at the advanced clock verifies, so the failure above is
+    # about skew rather than about anything else the advanced clock touched.
+    fresh = await verify(
+        app_conn, mandate, settings, store=InMemoryNonceStore(), now=far_future
+    )
+    assert fresh.ok is True

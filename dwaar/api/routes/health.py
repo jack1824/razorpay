@@ -107,12 +107,23 @@ async def health(request: Request) -> dict:
     if scorer is not None:
         components["risk_model"]["model_version"] = scorer.model_version
 
-    # Not built yet. Reported as down with their real fail modes, so the console shows the
-    # truth rather than an empty space that reads as healthy. `injection_detector` being
-    # down is also the only public statement that `injection_flag = false` on a record
-    # currently means "nothing checked" rather than "checked and clean".
-    for pending in ("injection_detector", "explainer"):
-        components[pending] = _report(pending, False, "not implemented", now)
+    # The injection detector is UP whenever the process is: its named rules need no
+    # artifact, so there is no state in which it stops checking. What varies is whether the
+    # fitted weights loaded — reported as a reason rather than as a status, because
+    # "rules only" is a smaller check and not an absent one.
+    detector = getattr(app.state, "detector", None)
+    components["injection_detector"] = _report(
+        "injection_detector",
+        detector is not None,
+        None if detector is None else detector.degraded,
+        now,
+    )
+    if detector is not None:
+        components["injection_detector"]["model_version"] = detector.model_version
+
+    # Not built yet. Reported as down with its real fail mode, so the console shows the
+    # truth rather than an empty space that reads as healthy.
+    components["explainer"] = _report("explainer", False, "not implemented", now)
 
     status = overall([Severity(component["severity"]) for component in components.values()])
 

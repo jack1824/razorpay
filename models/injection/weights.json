@@ -1,0 +1,41 @@
+{
+  "model_version": "inj-0.1.0-249870e22da1",
+  "feature_names": [
+    "imperative_lead",
+    "directive_density",
+    "override_phrase",
+    "system_role_token",
+    "role_prefix",
+    "delimiter_break",
+    "encoded_blob",
+    "unicode_escape",
+    "policy_noun_density",
+    "second_person_address",
+    "punctuation_anomaly",
+    "length_words"
+  ],
+  "coefficients": [
+    2.921404,
+    2.837898,
+    2.968135,
+    0.407535,
+    2.984273,
+    1.383358,
+    5.856958,
+    2.032084,
+    3.322309,
+    6.51474,
+    3.266547,
+    3.842478
+  ],
+  "intercept": -5.770132,
+  "flag_threshold": 0.6,
+  "training": {
+    "seed": 20260828,
+    "hostile_rows": 700,
+    "benign_rows": 726,
+    "benign_includes_catalogue": true,
+    "in_sample_accuracy": 0.9818,
+    "note": "Composed from templates and fillers. The zoo's payloads and lookalikes are NOT in this corpus \u2014 they are the held-out set, scored by `make eval`. In-sample accuracy is reported for completeness and means very little."
+  }
+}

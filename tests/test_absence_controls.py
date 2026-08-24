@@ -147,9 +147,14 @@ def test_a_stub_without_a_token_would_be_caught():
 
 def test_unimplemented_make_targets_exit_non_zero():
     """A green stub is a control that is not there — the same failure as a hardcoded
-    metric, and it fails at the worst possible moment."""
+    metric, and it fails at the worst possible moment.
+
+    `verify` landed on 25 Aug and `eval` on 28 Aug; each moved to the list below as it
+    became real. `demo` is the last one, and until it drives actual beats it must keep
+    exiting non-zero.
+    """
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    for target in ("eval", "demo"):
+    for target in ("demo",):
         block = re.search(rf"^{target}:\n((?:\t.*\n)+)", makefile, re.M)
         assert block, f"no {target} target in the Makefile"
         assert "exit 2" in block.group(1), (
@@ -157,13 +162,19 @@ def test_unimplemented_make_targets_exit_non_zero():
         )
 
 
-def test_verify_is_no_longer_a_stub():
-    """It landed on 25 Aug. If it regressed to `exit 2`, the acceptance criterion is gone."""
+@pytest.mark.parametrize(
+    ("target", "must_invoke"),
+    [("verify", "verify_cli"), ("eval", "eval.report")],
+)
+def test_a_landed_target_is_no_longer_a_stub(target, must_invoke):
+    """`verify` landed 25 Aug, `eval` 28 Aug. If either regressed to `exit 2`, an
+    acceptance criterion would be silently gone — and a target that exits 2 is
+    indistinguishable from one that was never built."""
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    block = re.search(r"^verify:\n((?:\t.*\n)+)", makefile, re.M)
-    assert block
+    block = re.search(rf"^{target}:\n((?:\t.*\n)+)", makefile, re.M)
+    assert block, f"no {target} target in the Makefile"
     assert "exit 2" not in block.group(1)
-    assert "verify_cli" in block.group(1)
+    assert must_invoke in block.group(1)
 
 
 # ── BaseHTTPMiddleware is banned (F-015, F-021) ─────────────────────────────────────

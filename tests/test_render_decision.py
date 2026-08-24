@@ -24,6 +24,7 @@ from dwaar.authorize.stages.decision import (
 from dwaar.authorize.types import (
     AuthorityResult,
     AuthorizeRequest,
+    InjectionResult,
     LedgerResult,
     MandateResult,
     PolicyResult,
@@ -43,7 +44,14 @@ REQ = AuthorizeRequest(
 SIG_OK = SignatureResult(ok=True, agent_id=REQ.agent_id)
 MANDATE_OK = MandateResult(ok=True, merchant_id="mch_1", principal_id="prn_1")
 GATE_OK = AuthorityResult(ok=True, permitted=True)
-RISK_QUIET = RiskResult(ok=True, risk_score=None, injection_flag=False)
+RISK_QUIET = RiskResult(ok=True, risk_score=None)
+
+#: Checked, nothing found. NOT the same as `InjectionResult()`, whose `flagged` is None and
+#: means no detector ran — a distinction migration 0014 made structural.
+INJECTION_CLEAN = InjectionResult(ok=True, flagged=False, confidence=0.0)
+INJECTION_FLAGGED = InjectionResult(
+    ok=True, flagged=True, confidence=0.97, matched_pattern="override_phrase"
+)
 POLICY_PERMIT = PolicyResult(ok=True, verdict="permit", policy_version=0)
 LEDGER_OK = LedgerResult(ok=True, reserved=True, budget_before=5_000_000, budget_after=4_876_000)
 
@@ -53,6 +61,7 @@ def render(**overrides):
         "signature": SIG_OK,
         "mandate": MANDATE_OK,
         "authority": GATE_OK,
+        "injection": INJECTION_CLEAN,
         "risk": RISK_QUIET,
         "policy": POLICY_PERMIT,
         "ledger": LEDGER_OK,
@@ -137,10 +146,29 @@ def test_a_high_risk_score_alone_cannot_deny():
 
 
 def test_injection_flag_denies():
-    d = render(risk=RiskResult(ok=True, risk_score=0.4, model_version="lgbm-1",
-                               injection_flag=True))
+    """The flag comes from stage 3.5, not from the scorer.
+
+    It used to live on `RiskResult`, which meant the component that reads hostile text and
+    the component that scores behaviour shared a return type. They are separate now, and the
+    signature is what keeps the scorer from ever seeing a request.
+    """
+    d = render(risk=RiskResult(ok=True, risk_score=0.4, model_version="lgbm-1"),
+               injection=INJECTION_FLAGGED)
     assert d.decision == "deny"
     assert d.rule_fired == "injection.detected"
+
+
+def test_an_unchecked_injection_flag_denies_nothing():
+    """NULL is not a finding.
+
+    A gate-denied request never reaches stage 3.5, so its record carries NULL. If NULL were
+    read as truthy anywhere, every arithmetic denial would additionally claim an injection
+    attempt — a signed record asserting an attack that was never looked for.
+    """
+    unchecked = InjectionResult(ok=True, flagged=None)
+    d = render(injection=unchecked)
+    assert d.decision == "allow"
+    assert d.rule_fired is None
 
 
 @pytest.mark.parametrize(
@@ -215,8 +243,8 @@ def test_outbound_reason_codes_are_coarse():
 
     mandates = [MANDATE_OK, MandateResult(ok=False, merchant_id="m", internal_reason="revoked")]
     gates = [GATE_OK, AuthorityResult(ok=True, permitted=False, rule_fired="mandate.expired")]
-    risks = [RISK_QUIET, RiskResult(ok=True, risk_score=0.9, model_version="m",
-                                    injection_flag=True), None]
+    risks = [RISK_QUIET, RiskResult(ok=True, risk_score=0.9, model_version="m"), None]
+    injections = [INJECTION_CLEAN, INJECTION_FLAGGED, InjectionResult(ok=True), None]
     policies = [POLICY_PERMIT, PolicyResult(ok=True, verdict="deny", policy_version=1),
                 PolicyResult(ok=True, verdict="step_up", policy_version=1), None]
     ledgers = [LEDGER_OK, LedgerResult(ok=True, reserved=False,
@@ -224,10 +252,10 @@ def test_outbound_reason_codes_are_coarse():
                LedgerResult(ok=False, internal_reason="down"), None]
 
     seen = set()
-    for mandate, gate, risk, pol, ledger in itertools.product(
-        mandates, gates, risks, policies, ledgers
+    for mandate, gate, inj, risk, pol, ledger in itertools.product(
+        mandates, gates, injections, risks, policies, ledgers
     ):
-        d = render_decision(REQ, SIG_OK, mandate, gate, risk, pol, ledger)
+        d = render_decision(REQ, SIG_OK, mandate, gate, inj, risk, pol, ledger)
         assert d.reason_code in coarse, f"leaked a fine-grained code: {d.reason_code}"
         seen.add(d.decision)
 

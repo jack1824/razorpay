@@ -78,6 +78,7 @@ NAMESPACE: frozenset[str] = frozenset(
         "budget.remaining_paise",
         "risk.score",
         "risk.injection_flag",
+        "risk.injection_checked",
         "agent.verified",
         # Every behavioural feature the model consumes is also referenceable by a rule, and
         # the two lists are kept in step by `tests/policy/test_engine.py`. A feature the

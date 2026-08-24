@@ -34,6 +34,7 @@ from dwaar.crypto.signer import derive_signer, ensure_registered
 from dwaar.logging import configure_logging, get_logger
 from dwaar.nonce import RedisNonceStore
 from dwaar.policy.store import PolicyStore
+from dwaar.risk import injection as injectionmod
 from dwaar.risk import model as riskmodel
 from dwaar.risk.observations import RedisObservationStore
 
@@ -97,6 +98,16 @@ async def lifespan(app: FastAPI):
     # a degraded state, not a broken one — the gate, the policy engine and the ledger are
     # unaffected, and every record made in that window says `risk_model_unavailable`.
     app.state.scorer = riskmodel.load(settings.model_dir)
+
+    # The injection detector. `load()` never returns None: the named rules need no artifact
+    # and are the highest-precision signals in the set, so losing them because a JSON file
+    # was missing would be the worst available trade.
+    app.state.detector = injectionmod.load(settings.injection_dir)
+    log.info(
+        "injection_detector",
+        model_version=app.state.detector.model_version,
+        degraded_mode=[app.state.detector.degraded] if app.state.detector.degraded else [],
+    )
     log.info(
         "risk_model",
         loaded=app.state.scorer is not None,

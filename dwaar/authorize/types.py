@@ -113,6 +113,22 @@ class RiskResult(StageResult):
 
 
 @dataclass(frozen=True)
+class InjectionResult(StageResult):
+    """Stage 3.5. `flagged` is a TRISTATE and lands in the record as one.
+
+    None means the detector did not run. False means it ran and found nothing — including
+    the case where there was no free text at all, because "nothing to read" is a finding and
+    "nobody read" is not. Migration 0014 constrains the column to agree with
+    `stages_executed`, so the two cannot drift.
+    """
+
+    flagged: bool | None = None
+    confidence: float | None = None
+    matched_pattern: str | None = None
+    model_version: str | None = None
+
+
+@dataclass(frozen=True)
 class PolicyResult(StageResult):
     verdict: PolicyVerdict = "permit"
     rule_fired: str | None = None

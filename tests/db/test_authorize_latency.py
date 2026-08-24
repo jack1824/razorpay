@@ -23,6 +23,21 @@ discovering 300ms on day 11. Hence one of each.
 not the gateway's; folding it in would inflate a number we then quote as ours. Signature
 *verification* is inside, because stage 1 is inside.
 
+**The benchmark runs on a SIMULATED CLOCK, and that is load-bearing.**
+
+A thousand identical requests fired in a tight loop is, to the risk model, a card tester —
+same amount, same card, same SKU, hundreds per second. The model denied them, correctly, and
+the benchmark quietly stopped measuring the allow path: a denial short-circuits the ledger,
+so stage 6 never ran and the reported p99 was for a cheaper pipeline than the one the 25ms
+budget was set for. `assert_complete` caught it on its first run.
+
+So each request carries a `created` timestamp and a pipeline `now` five simulated seconds
+after the last. Nothing about the work is faked — real Ed25519 verification, real Redis round
+trip, real ONNX inference, real chain write. Only the *spacing* the feature window sees is
+synthetic, which is what makes the benchmark measure an ordinary agent's request rather than
+an attack. The p99 quoted is deliberately the **allow** path, because it runs every stage and
+is the expensive one.
+
 **The measured pipeline must be the COMPLETE pipeline.** These tests originally called
 `pipeline.authorize` without an observation store and without a scorer, which meant Redis was
 never touched and ONNX Runtime was never invoked — `record_observation` came back at 0.000ms
@@ -37,6 +52,7 @@ a degraded path when either is missing, and every run asserts `degraded_mode` ca
 from __future__ import annotations
 
 import json
+import random
 import statistics
 import time
 import uuid
@@ -45,11 +61,19 @@ import psycopg
 import pytest
 
 from dwaar.authorize import pipeline
+from dwaar.authorize.stages import authority
 from dwaar.authorize.types import AuthorizeRequest
 from dwaar.crypto import http_sig
 from dwaar.crypto import keys as keymod
 from dwaar.crypto.signer import ensure_registered
+
+#: The REAL detector. Needs no artifact and no session — eleven arithmetic
+#: features — so a test running without one would only be exercising the
+#: not-checked path, and every record it wrote would carry a NULL flag.
+from dwaar.risk import injection as _injection
 from tests.conftest import AGENT_SEED, REDIS_URL, rand_id
+
+DETECTOR = _injection.load()
 
 pytestmark = pytest.mark.db
 
@@ -58,15 +82,35 @@ PIPELINE_P99_BUDGET_MS = 25.0
 HTTP_P99_GUARD_RAIL_MS = 150.0
 
 
-def _signed(mandate, key: str):
-    """Build one signed request. Called outside timed regions on purpose."""
+#: Seeded, so two runs of the benchmark send the same traffic and a p99 difference between
+#: them is a difference in the code rather than in the workload.
+_BENCH_RNG = random.Random(20260828)
+
+_BENCH_SKUS = ("SKU1000", "SKU1004", "SKU9002")
+
+
+def _signed(mandate, key: str, *, created: int | None = None):
+    """Build one signed request. Called outside timed regions on purpose.
+
+    Amount and SKU vary, and `next_gap` jitters the spacing, because a benchmark of a
+    thousand IDENTICAL requests at a perfectly regular cadence is — to the risk model — a
+    card tester, and it was denied as one. Zero amount entropy, zero cadence entropy and zero
+    inter-arrival variance is the exact profile the top feature keys on.
+
+    The model was correct and the benchmark was wrong. What this file wants to measure is an
+    ordinary agent's request travelling every stage, so the traffic is shaped like an ordinary
+    agent's rather than tuned until the model stops objecting.
+    """
     request = AuthorizeRequest(
         agent_id=mandate["agent_id"],
         mandate_id=mandate["mandate_id"],
         action="purchase",
-        amount_paise=1_000,
+        amount_paise=_BENCH_RNG.randint(20_000, 180_000),
         idempotency_key=key,
         category="groceries",
+        sku=_BENCH_RNG.choice(_BENCH_SKUS),
+        instrument_bin="411111",
+        cart_id=f"cart-bench-{_BENCH_RNG.getrandbits(16):04x}",
     )
     body = json.dumps(
         {
@@ -76,6 +120,9 @@ def _signed(mandate, key: str):
             "amount_paise": request.amount_paise,
             "idempotency_key": request.idempotency_key,
             "category": request.category,
+            "sku": request.sku,
+            "instrument_bin": request.instrument_bin,
+            "cart_id": request.cart_id,
         },
         separators=(",", ":"),
     ).encode()
@@ -86,10 +133,34 @@ def _signed(mandate, key: str):
         path="/v1/authorize",
         body=body,
         keyid=request.agent_id,
-        created=int(time.time()),
+        created=created if created is not None else int(time.time()),
         nonce=uuid.uuid4().hex,
     )
     return request, headers, body
+
+
+#: Simulated seconds between benchmark requests, jittered. Wide and ragged enough that the
+#: feature window reads an ordinary agent rather than a machine, so the model permits and
+#: every stage actually runs.
+SIMULATED_GAP_RANGE = (3, 25)
+
+
+def _clock():
+    """Timestamps advancing in simulated time, starting near now so signature skew holds.
+
+    The signature's `created` and the pipeline's `now` move together — a simulated clock on
+    one and a wall clock on the other would fail the 120-second skew check, which is a real
+    control and is not being bypassed here.
+
+    Nothing about the WORK is simulated: real Ed25519 verification, real Redis round trip,
+    real ONNX inference, real chain write. Only the spacing the feature window sees.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    at = datetime.now(UTC)
+    while True:
+        at = at + timedelta(seconds=_BENCH_RNG.randint(*SIMULATED_GAP_RANGE))
+        yield at
 
 
 def percentile(values: list[float], p: float) -> float:
@@ -153,12 +224,53 @@ async def observation_store():
 def assert_complete(outcome) -> None:
     """The control that keeps every number in this file honest.
 
-    Without it a missing collaborator turns the measurement into a measurement of a
-    different, cheaper pipeline — and the gate goes green.
+    Rule 4 says every number is computed at run time. That rules out fabrication; it does not
+    rule out measuring the wrong thing. F-033 was exactly that — a green gate over a pipeline
+    where `record_observation` cost 0.000ms and `score_risk` cost 0.002ms, because neither
+    collaborator had been supplied and both stages short-circuited before doing any work. The
+    number was computed. It was computing a different quantity than its label claimed.
+
+    So the label's PRECONDITIONS are asserted, not just its value. Three of them:
+
+        no stubs in the pipeline at all
+        no runtime degradation on the request that was measured
+        every stage in the registry actually cost something
+
+    A stage that costs zero is either not running or not being timed. Neither is acceptable
+    in a figure this project quotes.
     """
+    assert pipeline.STUB_STAGES == {}, (
+        f"stubs remain in the pipeline: {pipeline.STUB_STAGES}. A latency figure measured "
+        "with a stage stubbed is a figure for a system we do not ship."
+    )
     assert outcome.degraded_mode == [], (
         f"the measured pipeline was DEGRADED ({outcome.degraded_mode}); this latency number "
         "describes a pipeline with stages missing and must not be reported"
+    )
+
+    assert outcome.decision.decision in ("allow", "bound"), (
+        f"the measured request was {outcome.decision.decision} "
+        f"({outcome.decision.rule_fired}). A denial short-circuits the ledger, so this "
+        "number is for a cheaper pipeline than the one the 25ms budget was set for. The "
+        "benchmark must measure the ALLOW path, which runs every stage."
+    )
+
+    measured = set(outcome.stage_timings_us)
+    missing = set(pipeline.STAGE_ORDER) - measured
+    assert not missing, f"stages never timed: {sorted(missing)}"
+
+    # `check_authority` and `render_decision` are pure and sub-microsecond, so they can
+    # legitimately round to zero on a fast machine. Every stage that does I/O or real
+    # computation cannot.
+    PURE = {authority.STAGE_NAME, "render_decision"}
+    free = sorted(
+        stage
+        for stage, micros in outcome.stage_timings_us.items()
+        if micros == 0 and stage not in PURE
+    )
+    assert not free, (
+        f"stages reporting 0us: {free}. A stage that costs nothing is either not running or "
+        "not being timed — F-033 was both, and the gate was green throughout."
     )
 
 
@@ -199,27 +311,34 @@ async def test_pipeline_p99_under_25ms(
 ):
     """THE gate. 1,000 requests through the full pipeline including the chain write."""
     _merchant, mandate = bench_mandate
-    warmup = [_signed(mandate, f"warm-{i:04d}-{'x' * 8}") for i in range(20)]
-    prepared = [_signed(mandate, f"bench-{i:06d}-{'x' * 8}") for i in range(REQUESTS)]
+    clock = _clock()
+    warmup = [
+        (*_signed(mandate, f"warm-{i:04d}-{'x' * 8}", created=int(at.timestamp())), at)
+        for i, at in ((i, next(clock)) for i in range(20))
+    ]
+    prepared = [
+        (*_signed(mandate, f"bench-{i:06d}-{'x' * 8}", created=int(at.timestamp())), at)
+        for i, at in ((i, next(clock)) for i in range(REQUESTS))
+    ]
     samples: list[float] = []
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         # Warm the pool, the prepared statements and the chain tail before measuring.
-        for request, headers, body in warmup:
+        for request, headers, body, at in warmup:
             outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
-                headers=headers, body=body, nonce_store=nonce_store,
-                observation_store=observation_store, scorer=scorer,
+                headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
+                observation_store=observation_store, scorer=scorer, now=at,
             )
             await conn.commit()
         assert_complete(outcome)
 
-        for request, headers, body in prepared:
+        for request, headers, body, at in prepared:
             started = time.perf_counter()
             outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
-                headers=headers, body=body, nonce_store=nonce_store,
-                observation_store=observation_store, scorer=scorer,
+                headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
+                observation_store=observation_store, scorer=scorer, now=at,
             )
             await conn.commit()
             samples.append((time.perf_counter() - started) * 1000)
@@ -245,15 +364,19 @@ async def test_no_single_stage_dominates(
     a reason nobody can locate.
     """
     _merchant, mandate = bench_mandate
-    prepared = [_signed(mandate, f"stage-{i:05d}-{'x' * 8}") for i in range(200)]
+    clock = _clock()
+    prepared = [
+        (*_signed(mandate, f"stage-{i:05d}-{'x' * 8}", created=int(at.timestamp())), at)
+        for i, at in ((i, next(clock)) for i in range(200))
+    ]
     per_stage: dict[str, list[int]] = {}
 
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
-        for request, headers, body in prepared:
+        for request, headers, body, at in prepared:
             outcome = await pipeline.authorize(
                 request, conn=conn, signer=signer, settings=settings,
-                headers=headers, body=body, nonce_store=nonce_store,
-                observation_store=observation_store, scorer=scorer,
+                headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
+                observation_store=observation_store, scorer=scorer, now=at,
             )
             await conn.commit()
             for stage, micros in outcome.stage_timings_us.items():
@@ -352,7 +475,7 @@ async def test_recorded_latency_is_less_than_measured_total(
         started = time.perf_counter()
         outcome = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings,
-            headers=headers, body=body, nonce_store=nonce_store,
+            headers=headers, body=body, nonce_store=nonce_store, detector=DETECTOR,
         )
         measured_us = (time.perf_counter() - started) * 1_000_000
         await conn.commit()

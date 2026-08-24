@@ -7,7 +7,8 @@ Stage order and what each one may do:
    2.2 record_observation REAL  degrade         the rolling window — see below
    2.5 check_authority    REAL  pure, no I/O    authority — short-circuits 3-6
     3  compute_features   REAL  degrade         judgment
-    4  score_risk         REAL  fail-open       judgment
+   3.5 detect_injection   REAL  rules-only      judgment — sees TEXT, produces a boolean
+    4  score_risk         REAL  fail-open       judgment — sees NUMBERS, produces a score
     5  evaluate_policy    REAL  last-signed     deterministic rules
     6  reserve_budget     REAL  fail-closed     authority (cumulative cap)
     7  render_decision    REAL  pure            the answer
@@ -46,6 +47,7 @@ from dwaar import idempotency
 from dwaar.authorize.stages import authority as authority_stage
 from dwaar.authorize.stages import decision as decision_stage
 from dwaar.authorize.stages import features as features_stage
+from dwaar.authorize.stages import injection as injection_stage
 from dwaar.authorize.stages import ledger as ledger_stage
 from dwaar.authorize.stages import mandate as mandate_stage
 from dwaar.authorize.stages import policy as policy_stage
@@ -94,6 +96,7 @@ STAGE_ORDER: tuple[str, ...] = (
     OBSERVE_STAGE,
     authority_stage.STAGE_NAME,
     features_stage.STAGE_NAME,
+    injection_stage.STAGE_NAME,
     risk_stage.STAGE_NAME,
     policy_stage.STAGE_NAME,
     ledger_stage.STAGE_NAME,
@@ -206,6 +209,7 @@ async def authorize(
     policy_store: PolicyStore | None = None,
     observation_store: ObservationStore | None = None,
     scorer: risk_stage.ScorerLike | None = None,
+    detector: Any | None = None,
     now: datetime | None = None,
 ) -> PipelineOutcome:
     """Run the pipeline. The caller owns the transaction and commits on success."""
@@ -260,7 +264,7 @@ async def authorize(
         if prior is not None:
             return _replayed(prior, timer, started)
 
-    features = risk = policy = ledger = None
+    features = risk = policy = ledger = injection = None
 
     # ── 2.2 observe. Before the gate, deliberately — see the module docstring. ───────
     window = await timer.run(
@@ -295,6 +299,25 @@ async def authorize(
             if features.degraded:
                 degraded.append(features.degraded)
 
+            # The ONLY stage that reads agent-supplied text. It produces a boolean, never
+            # a score, and nothing downstream of it sees the text — which is what keeps the
+            # behavioural model out of reach of anything an attacker can write.
+            # Guarded, because "the stage ran" and "the flag is not NULL" have to agree —
+            # migration 0014 constrains the record to it. A stage that runs without a
+            # detector would appear in `stages_executed` while reporting NOT CHECKED, which
+            # is precisely the contradiction the tristate exists to prevent. The application
+            # always supplies one; `dwaar.risk.injection.load()` never returns None.
+            if detector is not None:
+                injection = timer.sync(
+                    injection_stage.STAGE_NAME,
+                    injection_stage.detect_injection,
+                    request,
+                    detector=detector,
+                )
+                executed.append(injection_stage.STAGE_NAME)
+                if injection.degraded:
+                    degraded.append(injection.degraded)
+
             # The scorer sees the feature vector and nothing else — not the request, not
             # the mandate, not a connection. So a stored row can be replayed against the
             # named model version and produce the same number.
@@ -316,6 +339,7 @@ async def authorize(
                     store=policy_store or _DEFAULT_POLICY_STORE,
                     merchant_id=mandate.merchant_id,
                     features=features.features,
+                    injection=injection,
                 ),
             )
             executed.append(policy_stage.STAGE_NAME)
@@ -323,7 +347,7 @@ async def authorize(
                 degraded.append(policy.degraded)
 
             # ── 6. budget. Only if 1-5 permit. ──────────────────────────────────────
-            if policy.verdict != "deny" and not risk.injection_flag:
+            if policy.verdict != "deny" and not (injection and injection.flagged):
                 ledger = await timer.run(
                     ledger_stage.STAGE_NAME,
                     ledger_stage.reserve_budget(request, mandate.mandate, conn=conn),
@@ -346,6 +370,7 @@ async def authorize(
         signature,
         mandate,
         gate,
+        injection,
         risk,
         policy,
         ledger,
@@ -365,6 +390,7 @@ async def authorize(
             mandate=mandate,
             authority=gate,
             features=features,
+            injection=injection,
             risk=risk,
             policy=policy,
             ledger=ledger,
@@ -409,6 +435,7 @@ async def authorize(
         reason_code=decision.reason_code,
         rule_fired=decision.rule_fired,
         risk_score=risk.risk_score if risk else None,
+        injection_flag=injection.flagged if injection else None,
         risk_band=risk.band if risk else None,
         supervised_score=risk.supervised_score if risk else None,
         anomaly_score=risk.anomaly_score if risk else None,

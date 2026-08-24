@@ -65,7 +65,8 @@ def build_namespace(
     mandate: dict[str, Any] | None = None,
     budget_remaining_paise: int | None = None,
     risk_score: float | None = None,
-    injection_flag: bool = False,
+    injection_flag: bool | None = None,
+    injection_checked: bool = False,
     agent_verified: bool | None = None,
     features: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -90,7 +91,14 @@ def build_namespace(
         "mandate.substitution_tolerance": mandate.get("substitution_tolerance"),
         "budget.remaining_paise": budget_remaining_paise,
         "risk.score": risk_score,
+        # TRISTATE. None means no detector ran, and every comparison against None is
+        # FALSE — so `risk.injection_flag == true` cannot fire on an unchecked request, and
+        # an absent check can never *cause* a deny any more than it can cause an allow.
         "risk.injection_flag": injection_flag,
+        # Which is why the second variable exists: a merchant that wants to be cautious
+        # about unread text needs to be able to say so, and it cannot express that by
+        # comparing a tristate to a boolean.
+        "risk.injection_checked": injection_checked,
         "agent.verified": agent_verified,
         # Built from the same list the model consumes, so a feature can never be present
         # for the model and absent for the policy engine. A missing key resolves to None,

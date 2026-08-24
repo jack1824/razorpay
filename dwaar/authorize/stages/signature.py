@@ -92,6 +92,20 @@ async def verify_signature(
             body=body,
             headers=headers,
             public_keys=acceptable,
+            # The SAME clock the rotation-overlap check above uses.
+            #
+            # This previously defaulted to `time.time()` while `reference` came from the
+            # caller, so one function held two notions of "now" — the rotation window moved
+            # with the pipeline's clock and the skew window did not. Nothing had gone wrong
+            # yet; a benchmark that advanced the pipeline's clock found it, because its
+            # signatures were then rejected as 127 seconds in the future by a check reading a
+            # different clock than the one that stamped them.
+            #
+            # It does not weaken the skew control. `now` originates in
+            # `dwaar/authorize/pipeline.py` as `datetime.now(UTC)` for every request that
+            # arrives over HTTP; only an in-process caller can supply another value, and an
+            # in-process caller could call `verify_request` directly regardless.
+            now=int(reference.timestamp()),
         )
     except http_sig.SignatureError as exc:
         return SignatureResult(ok=False, internal_reason=str(exc))

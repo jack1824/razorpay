@@ -350,7 +350,11 @@ def write_record(signer):
             "request_idempotency_key": None,
             "decision": decision,
             "reason_code": "allowed" if decision == "allow" else "denied",
-            "injection_flag": False,
+            # NULL, not False. This fixture writes a record without running the detection
+            # stage, so claiming "checked and clean" would be a fixture asserting something
+            # the verifier — and migration 0014's constraint — would reject. Same lesson as
+            # F-018: a fixture a control would refuse cannot be used to test that control.
+            "injection_flag": None,
             "features": {},
             "degraded_mode": [],
             "stages_executed": ["render_decision"],
@@ -415,11 +419,18 @@ def authorize_signed(nonce_store, signer, settings):
     # One store per fixture instance, so windows do not leak between tests. The scorer
     # returns a fixed, confidently-benign score: tests that care about a specific score pass
     # their own, and a low default keeps an `allow` an `allow`.
+    from dwaar.risk import injection as injectionmod
     from dwaar.risk.observations import InMemoryObservationStore
     from tests._support.fakes import FixedScorer
 
     default_store = InMemoryObservationStore()
     default_scorer = FixedScorer(0.05)
+
+    # The REAL detector, not a double. It needs no database and no session — eleven
+    # arithmetic features and a dot product — so there is no reason for a test to run
+    # without it, and running without one would make `injection_flag` NULL on every record
+    # and quietly break the tristate constraint added in migration 0014.
+    default_detector = injectionmod.load()
 
     async def _run(conn, request: AuthorizeRequest, *, commit=True, private_key=None,
                    created=None, nonce=None, path="/v1/authorize", **kw):
@@ -435,6 +446,15 @@ def authorize_signed(nonce_store, signer, settings):
             separators=(",", ":"),
         ).encode()
         key = private_key or keymod.derive_private_key(AGENT_SEED, "agent", request.agent_id)
+        # Sign at the pipeline's clock. The signature stage now holds ONE clock — `now`
+        # governs skew as well as the key-rotation window — so a test that advances `now` to
+        # reach an expiry or a rotation boundary must sign at the advanced clock too. A
+        # request that claims to happen at time T and is signed at time T is also what
+        # actually happens; the previous arrangement was signing in the present and claiming
+        # to be from a year hence.
+        stamped = kw.get("now")
+        if created is None and stamped is not None:
+            created = int(stamped.timestamp())
         headers = http_sig.sign_request(
             key, method="POST", path=path, body=body, keyid=request.agent_id,
             created=created if created is not None else int(_time.time()),
@@ -442,6 +462,7 @@ def authorize_signed(nonce_store, signer, settings):
         )
         kw.setdefault("observation_store", default_store)
         kw.setdefault("scorer", default_scorer)
+        kw.setdefault("detector", default_detector)
         outcome = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings,
             headers=headers, body=body, path=path, nonce_store=nonce_store, **kw

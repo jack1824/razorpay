@@ -375,12 +375,20 @@ def roc_auc(scores: np.ndarray, labels: np.ndarray) -> float | None:
 
 
 def train(args: argparse.Namespace) -> int:
+    # BOOTSTRAP manifests only. Traffic generated against a gateway with a model loaded is
+    # shaped by that model — see F-031 — and the refusal below catches it, but defaulting to
+    # the right glob means nobody has to hit the refusal to find out.
     manifests = (
         [Path(args.manifest)] if args.manifest
-        else sorted(TRAFFIC_DIR.glob("*.jsonl"))
+        else sorted(TRAFFIC_DIR.glob("bootstrap-*.jsonl"))
     )
     if not manifests:
-        print(f"no run manifests under {TRAFFIC_DIR}; run `python -m zoo.run` first")
+        print(
+            f"no bootstrap manifests under {TRAFFIC_DIR}.\n"
+            "Training traffic must be generated against a gateway with NO model loaded:\n"
+            "  DWAAR_MODEL_DIR=/nonexistent uvicorn dwaar.api.app:app --port 8080\n"
+            "  make traffic"
+        )
         return 2
 
     labels = load_manifests(manifests)
@@ -636,6 +644,9 @@ def train(args: argparse.Namespace) -> int:
         },
     }
     (out / "bundle.json").write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+    (out / "reliability.svg").write_text(
+        _reliability_svg(bundle["evaluation"]["reliability"]) + "\n", encoding="utf-8"
+    )
 
     _report(bundle, out)
     return 0
@@ -717,11 +728,78 @@ def _per_archetype(rows: list[Row], scores: np.ndarray, threshold: float) -> dic
     return result
 
 
+def _reliability_svg(table: list[dict]) -> str:
+    """The reliability diagram, as an SVG built by hand.
+
+    No matplotlib: it is a large dependency for one chart, and a committed PNG cannot be
+    diffed or recomputed by a reader. An SVG is text, so a reviewer can see the numbers that
+    produced the picture rather than trusting the picture.
+
+    What the chart shows: predicted probability against observed frequency, per decile. A
+    perfectly calibrated model sits on the diagonal. Bars below it are over-confident, above
+    it under-confident, and the 0.55 / 0.80 bands only mean anything if the model is close
+    to that line — an uncalibrated gradient-boosting margin is not a probability.
+    """
+    width, height, pad = 420, 420, 50
+    plot = width - 2 * pad
+
+    def x(value: float) -> float:
+        return pad + value * plot
+
+    def y(value: float) -> float:
+        return height - pad - value * plot
+
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}" font-family="monospace" font-size="10">',
+        f'<rect width="{width}" height="{height}" fill="#ffffff"/>',
+        f'<line x1="{x(0)}" y1="{y(0)}" x2="{x(1)}" y2="{y(1)}" stroke="#bbbbbb" '
+        f'stroke-dasharray="4 3"/>',
+        f'<line x1="{x(0)}" y1="{y(0)}" x2="{x(1)}" y2="{y(0)}" stroke="#333333"/>',
+        f'<line x1="{x(0)}" y1="{y(0)}" x2="{x(0)}" y2="{y(1)}" stroke="#333333"/>',
+    ]
+    for band, colour in ((STEP_UP_BAND, "#d08a1e"), (DENY_BAND, "#b03030")):
+        parts.append(
+            f'<line x1="{x(band)}" y1="{y(0)}" x2="{x(band)}" y2="{y(1)}" '
+            f'stroke="{colour}" stroke-dasharray="2 3"/>'
+        )
+        parts.append(f'<text x="{x(band) + 3}" y="{y(1) + 10}" fill="{colour}">{band}</text>')
+
+    points = [
+        (row["mean_predicted"], row["observed_rate"], row["count"])
+        for row in table
+        if row["count"] and row["mean_predicted"] is not None
+    ]
+    for predicted, observed, count in points:
+        radius = 2.5 + min(6.0, (count ** 0.5) / 3)
+        parts.append(
+            f'<circle cx="{x(predicted):.1f}" cy="{y(observed):.1f}" r="{radius:.1f}" '
+            f'fill="#1a4d2e" fill-opacity="0.75"/>'
+        )
+    if len(points) > 1:
+        path = " ".join(
+            f"{'M' if i == 0 else 'L'}{x(p):.1f},{y(o):.1f}"
+            for i, (p, o, _) in enumerate(points)
+        )
+        parts.append(f'<path d="{path}" fill="none" stroke="#1a4d2e" stroke-width="1.2"/>')
+
+    parts += [
+        f'<text x="{x(0.5) - 40}" y="{height - 14}">predicted P(not legitimate)</text>',
+        f'<text x="12" y="{y(0.5) + 40}" transform="rotate(-90 12 {y(0.5) + 40})">'
+        f'observed frequency</text>',
+        f'<text x="{pad}" y="{pad - 22}" font-size="12">Reliability — held-out agents</text>',
+        f'<text x="{pad}" y="{pad - 8}" fill="#666666">dashed diagonal = perfect '
+        f'calibration; circle area ~ bin count</text>',
+        "</svg>",
+    ]
+    return "\n".join(parts)
+
+
 def _report(bundle: dict, out: Path) -> None:
     print()
     print(f"model_version    {bundle['model_version']}")
     print(f"written to       {out}/")
-    for name in ("supervised.onnx", "anomaly.onnx", "bundle.json"):
+    for name in ("supervised.onnx", "anomaly.onnx", "bundle.json", "reliability.svg"):
         size = (out / name).stat().st_size
         print(f"  {name:<18}{size / 1024:8.1f} KiB")
 

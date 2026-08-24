@@ -33,7 +33,14 @@ import pytest
 
 from dwaar.authorize.stages import features as features_stage
 from dwaar.risk import features as featuremod
+
+#: The REAL detector. Needs no artifact and no session — eleven arithmetic
+#: features — so a test running without one would only be exercising the
+#: not-checked path, and every record it wrote would carry a NULL flag.
+from dwaar.risk import injection as _injection
 from dwaar.risk.observations import Observation, WindowSnapshot
+
+DETECTOR = _injection.load()
 
 NOW = 1_800_000_000.0
 
@@ -177,6 +184,7 @@ async def test_the_vector_does_not_move_when_the_mandate_does(
         vectors: list[dict] = []
         async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
             for index, (amount, category, sku) in enumerate(script):
+                stamped = _FIXED_TIMES[index]
                 request = AuthorizeRequest(
                     agent_id=mandate["agent_id"],
                     mandate_id=mandate["mandate_id"],
@@ -199,10 +207,14 @@ async def test_the_vector_does_not_move_when_the_mandate_does(
                     "instrument_bin": request.instrument_bin,
                     "cart_id": request.cart_id,
                 }
-                headers, body = sign_headers(request.agent_id, payload)
+                # Stamped at the SIMULATED clock, not the wall clock. The signature stage
+                # holds one notion of "now" and uses it for skew as well as for key
+                # rotation, so a fixed base time means fixed signature times too.
+                headers, body = sign_headers(
+                    request.agent_id, payload, created=int(stamped.timestamp())
+                )
                 # A FIXED clock. Two runs at different wall-clock times would produce
                 # different inter-arrival gaps and the comparison would be meaningless.
-                stamped = _FIXED_TIMES[index]
                 outcome = await pipeline.authorize(
                     request,
                     conn=conn,
@@ -210,7 +222,7 @@ async def test_the_vector_does_not_move_when_the_mandate_does(
                     settings=settings,
                     headers=headers,
                     body=body,
-                    nonce_store=nonce_store,
+                    nonce_store=nonce_store, detector=DETECTOR,
                     observation_store=store,
                     now=stamped,
                 )
@@ -258,7 +270,14 @@ async def test_the_vector_does_not_move_when_the_mandate_does(
 def _fixed_times():
     from datetime import UTC, datetime, timedelta
 
-    base = datetime(2026, 8, 27, 12, 0, 0, tzinfo=UTC)
+    # Anchored to the run's own start rather than to a literal date. A hard-coded date
+    # drifts out of the mandate's validity window and, now that the signature stage holds a
+    # single clock, out of the skew window too — so the test would eventually fail for a
+    # reason that has nothing to do with what it asserts.
+    #
+    # What matters for this test is only that BOTH runs see the SAME offsets, so that any
+    # difference in the feature vectors comes from the mandate rather than from the clock.
+    base = datetime.now(UTC)
     return [base + timedelta(seconds=offset) for offset in (0, 3, 9, 20, 47, 95)]
 
 

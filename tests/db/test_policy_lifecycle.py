@@ -18,8 +18,15 @@ from dwaar.authorize.types import AuthorizeRequest
 from dwaar.crypto.signer import ensure_registered
 from dwaar.db.repositories import policies as policy_repo
 from dwaar.policy.store import NO_COMPILED_POLICY, PolicyStore
+
+#: The REAL detector. Needs no artifact and no session — eleven arithmetic
+#: features — so a test running without one would only be exercising the
+#: not-checked path, and every record it wrote would carry a NULL flag.
+from dwaar.risk import injection as _injection
 from tests._support.fakes import FixedScorer
 from tests.conftest import rand_id
+
+DETECTOR = _injection.load()
 
 pytestmark = pytest.mark.db
 
@@ -246,7 +253,8 @@ async def test_policy_deny_beats_a_benign_risk_score_through_the_pipeline(
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         outcome = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings, headers=headers,
-            body=body, nonce_store=nonce_store, policy_store=PolicyStore(ttl_seconds=0),
+            body=body, nonce_store=nonce_store, detector=DETECTOR,
+            policy_store=PolicyStore(ttl_seconds=0),
             scorer=benign,
         )
         await conn.commit()
@@ -310,7 +318,8 @@ async def test_a_record_carries_policy_version_zero_when_none_is_approved(
     async with await psycopg.AsyncConnection.connect(app_dsn) as conn:
         allowed = await pipeline.authorize(
             request, conn=conn, signer=signer, settings=settings, headers=headers,
-            body=body, nonce_store=nonce_store, policy_store=PolicyStore(ttl_seconds=0),
+            body=body, nonce_store=nonce_store, detector=DETECTOR,
+            policy_store=PolicyStore(ttl_seconds=0),
         )
         await conn.commit()
         record = await decision_records.get(conn, allowed.record_id)

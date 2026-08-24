@@ -72,6 +72,10 @@ NULLABLE_FIELDS: frozenset[str] = frozenset(
     {
         "request_idempotency_key",
         "rule_fired",
+        # TRISTATE since migration 0014. NULL means no detector ran on this request, which
+        # is the case for every gate-denied record — the gate short-circuits stages 3 to 6,
+        # so `detect_injection` never happens. `false` would claim a check nobody performed.
+        "injection_flag",
         "risk_score",
         "model_version",
         "policy_version",
