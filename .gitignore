@@ -1,0 +1,31 @@
+# Private key material. NEVER commit. See FAILURES.md F-004.
+.keys/
+*.pem
+*.key
+
+# The strategy package. LOCAL REFERENCE ONLY — never in public history.
+#
+# Not tidiness. It contains 19_PITCH/, 20_JUDGE_QA/, 21_RED_TEAM/ and
+# 19_PITCH/JUDGE_SCORE_OPTIMIZATION.md, which includes a section headed
+# "TOP 5 THINGS THAT INCREASE SCORE". A judge who clones this repo and reads our
+# rubric-optimisation notes has learned something no amount of good engineering
+# offsets. The engineering artifacts derived from it — README.md, THREAT_MODEL.md,
+# FAIL_MATRIX.md, FAILURES.md, docs/adr/ — are tracked and are the intended evidence.
+docs/strategy/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store

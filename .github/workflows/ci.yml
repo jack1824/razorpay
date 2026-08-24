@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push: {branches: [main]}
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres_pw
+          POSTGRES_DB: dwaar
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 2s
+          --health-timeout 3s --health-retries 30
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 30
+
+    env:
+      DATABASE_URL_MIGRATE: postgresql://dwaar_owner:owner_pw@localhost:5432/dwaar
+      DATABASE_URL_APP: postgresql://dwaar_app:app_pw@localhost:5432/dwaar
+      DATABASE_URL_SUPERUSER: postgresql://postgres:postgres_pw@localhost:5432/dwaar
+      REDIS_URL: redis://localhost:6379/0
+      PGPASSWORD: postgres_pw
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -e ".[dev]"
+
+      - name: Create roles (mirrors scripts/init-db/01-roles.sh)
+        run: ./scripts/init-db/local-bootstrap.sh postgres dwaar
+
+      - run: python -m ruff check dwaar tests scripts
+
+      # The DB suite must NOT be allowed to skip in CI. A skipped append-only test is
+      # indistinguishable from an absent control, and that is the whole point of the repo.
+      - name: Test (no skips permitted)
+        run: python -m pytest -q -p no:cacheprovider -W error::UserWarning
+      - name: Assert the database suite actually ran
+        run: |
+          python -m pytest -q -p no:cacheprovider -m db --collect-only \
+            | tail -1 | grep -qE '[0-9]+ tests? collected'
+          python -m pytest -p no:cacheprovider -m db -q 2>&1 | tee /tmp/db.txt
+          grep -q "skipped" /tmp/db.txt && { echo "DB tests skipped in CI — refusing"; exit 1; } || true
+
+      - name: make verify/eval/demo must exit non-zero until implemented
+        run: |
+          for t in verify eval demo; do
+            if make $t >/dev/null 2>&1; then
+              echo "make $t exited 0 but is not implemented — a green stub is a false claim"
+              exit 1
+            fi
+          done
