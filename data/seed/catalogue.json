@@ -1,0 +1,256 @@
+[
+  {
+    "category": "pharmacy",
+    "name": "pharmacy-item-0",
+    "price_paise": 48000,
+    "sku": "SKU1000"
+  },
+  {
+    "category": "pharmacy",
+    "name": "pharmacy-item-1",
+    "price_paise": 250000,
+    "sku": "SKU1001"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-2",
+    "price_paise": 4900,
+    "sku": "SKU1002"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-3",
+    "price_paise": 1200000,
+    "sku": "SKU1003"
+  },
+  {
+    "category": "household",
+    "name": "household-item-4",
+    "price_paise": 25000,
+    "sku": "SKU1004"
+  },
+  {
+    "category": "personal_care",
+    "name": "personal_care-item-5",
+    "price_paise": 4900,
+    "sku": "SKU1005"
+  },
+  {
+    "category": "personal_care",
+    "name": "personal_care-item-6",
+    "price_paise": 250000,
+    "sku": "SKU1006"
+  },
+  {
+    "category": "pharmacy",
+    "name": "pharmacy-item-7",
+    "price_paise": 4900,
+    "sku": "SKU1007"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-8",
+    "price_paise": 12000,
+    "sku": "SKU1008"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-9",
+    "price_paise": 1200000,
+    "sku": "SKU1009"
+  },
+  {
+    "category": "groceries",
+    "name": "groceries-item-10",
+    "price_paise": 4900,
+    "sku": "SKU1010"
+  },
+  {
+    "category": "household",
+    "name": "household-item-11",
+    "price_paise": 99000,
+    "sku": "SKU1011"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-12",
+    "price_paise": 250000,
+    "sku": "SKU1012"
+  },
+  {
+    "category": "personal_care",
+    "name": "personal_care-item-13",
+    "price_paise": 12000,
+    "sku": "SKU1013"
+  },
+  {
+    "category": "pharmacy",
+    "name": "pharmacy-item-14",
+    "price_paise": 48000,
+    "sku": "SKU1014"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-15",
+    "price_paise": 12000,
+    "sku": "SKU1015"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-16",
+    "price_paise": 99000,
+    "sku": "SKU1016"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-17",
+    "price_paise": 99000,
+    "sku": "SKU1017"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-18",
+    "price_paise": 250000,
+    "sku": "SKU1018"
+  },
+  {
+    "category": "stationery",
+    "name": "stationery-item-19",
+    "price_paise": 250000,
+    "sku": "SKU1019"
+  },
+  {
+    "category": "gift_cards",
+    "name": "gift_cards-item-20",
+    "price_paise": 99000,
+    "sku": "SKU1020"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-21",
+    "price_paise": 48000,
+    "sku": "SKU1021"
+  },
+  {
+    "category": "groceries",
+    "name": "groceries-item-22",
+    "price_paise": 25000,
+    "sku": "SKU1022"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-23",
+    "price_paise": 25000,
+    "sku": "SKU1023"
+  },
+  {
+    "category": "gift_cards",
+    "name": "gift_cards-item-24",
+    "price_paise": 48000,
+    "sku": "SKU1024"
+  },
+  {
+    "category": "household",
+    "name": "household-item-25",
+    "price_paise": 1200000,
+    "sku": "SKU1025"
+  },
+  {
+    "category": "stationery",
+    "name": "stationery-item-26",
+    "price_paise": 12000,
+    "sku": "SKU1026"
+  },
+  {
+    "category": "groceries",
+    "name": "groceries-item-27",
+    "price_paise": 25000,
+    "sku": "SKU1027"
+  },
+  {
+    "category": "household",
+    "name": "household-item-28",
+    "price_paise": 250000,
+    "sku": "SKU1028"
+  },
+  {
+    "category": "personal_care",
+    "name": "personal_care-item-29",
+    "price_paise": 99000,
+    "sku": "SKU1029"
+  },
+  {
+    "category": "pharmacy",
+    "name": "pharmacy-item-30",
+    "price_paise": 250000,
+    "sku": "SKU1030"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-31",
+    "price_paise": 4900,
+    "sku": "SKU1031"
+  },
+  {
+    "category": "stationery",
+    "name": "stationery-item-32",
+    "price_paise": 1200000,
+    "sku": "SKU1032"
+  },
+  {
+    "category": "household",
+    "name": "household-item-33",
+    "price_paise": 4900,
+    "sku": "SKU1033"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-34",
+    "price_paise": 99000,
+    "sku": "SKU1034"
+  },
+  {
+    "category": "personal_care",
+    "name": "personal_care-item-35",
+    "price_paise": 1200000,
+    "sku": "SKU1035"
+  },
+  {
+    "category": "household",
+    "name": "household-item-36",
+    "price_paise": 4900,
+    "sku": "SKU1036"
+  },
+  {
+    "category": "electronics",
+    "name": "electronics-item-37",
+    "price_paise": 12000,
+    "sku": "SKU1037"
+  },
+  {
+    "category": "apparel",
+    "name": "apparel-item-38",
+    "price_paise": 4900,
+    "sku": "SKU1038"
+  },
+  {
+    "category": "stationery",
+    "name": "stationery-item-39",
+    "price_paise": 99000,
+    "sku": "SKU1039"
+  },
+  {
+    "_edge_case": "must NOT trigger injection detector",
+    "category": "household",
+    "name": "Ignore Premium Detergent 2kg",
+    "price_paise": 34900,
+    "sku": "SKU9001"
+  },
+  {
+    "_beat_3": "warm-up buys one; the drift event buys it repeatedly at 10x ticket",
+    "category": "apparel",
+    "name": "Everyday Cotton T-Shirt",
+    "price_paise": 47500,
+    "sku": "SKU9002"
+  }
+]

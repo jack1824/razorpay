@@ -58,18 +58,25 @@ def test_dwaar_never_references_ground_truth(pattern):
     )
 
 
-def test_ground_truth_is_not_copied_into_the_repo():
-    """The labelled file must not be vendored anywhere the service could reach it.
+# Where the labelled file is allowed to live. `data/seed/` is the generator's output and
+# is read by `eval/` only; `docs/strategy/` is untracked local reference. Anywhere else —
+# and especially anywhere under `dwaar/` — is a leak waiting to happen.
+ALLOWED_GROUND_TRUTH_DIRS = ("data/seed", "docs/strategy", "eval")
 
-    The vendored strategy package under docs/strategy/ is documentation and is not
-    importable or served; anywhere else is a leak waiting to happen.
-    """
+
+def test_ground_truth_lives_only_where_the_evaluator_reads_it():
     strays = [
-        p.relative_to(REPO_ROOT)
+        rel
         for p in REPO_ROOT.rglob("ground_truth.json")
-        if "docs/strategy" not in str(p.relative_to(REPO_ROOT))
+        if not str(rel := p.relative_to(REPO_ROOT)).startswith(ALLOWED_GROUND_TRUTH_DIRS)
     ]
     assert not strays, (
-        "ground_truth.json may only exist under docs/strategy/ (documentation) or eval/ "
-        f"once eval/ exists. Found: {strays}"
+        f"ground_truth.json may only live under {list(ALLOWED_GROUND_TRUTH_DIRS)}. "
+        f"Found: {strays}"
     )
+
+
+def test_ground_truth_is_never_inside_the_service_package():
+    """The specific failure the control exists for, asserted directly."""
+    assert not list((DWAAR_ROOT).rglob("ground_truth.json"))
+    assert not list((DWAAR_ROOT).rglob("*archetype*"))

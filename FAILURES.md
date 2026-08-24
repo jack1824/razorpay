@@ -298,3 +298,62 @@ append-only control is absent under Compose while the local suite still passes. 
 carry a comment saying so.
 
 **Status: OPEN. Needs Docker installed, then `make up` run on a clean machine.**
+
+---
+
+### F-011 — The mandate golden vector was specified for day 2 and shipped in phase 2.5 — CLOSED
+
+**Found:** porting the seed generator, when it needed to sign a mandate and there was
+nothing pinning what "signed" meant.
+
+ADR 0001 item 9 said, in capitals: *"COMMIT THE GOLDEN VECTOR AS A TEST FIXTURE ON DAY 2,
+not day 4."* Phase 2 implemented half of it — `test_mandate_defaults_are_materialised`
+asserts the three defaulted columns are never NULL in the database — and skipped the half
+that mattered. The instruction was about **bytes**, not columns.
+
+**Why the database assertion does not cover it:** a signature is over a serialisation. Any
+change to key ordering, string escaping, number formatting, or field membership silently
+invalidates every signature ever produced, and the symptom is "signature invalid" — which is
+indistinguishable from a forgery. The column check would have kept passing throughout.
+
+**What we got wrong:** we read a requirement about canonical form as a requirement about
+schema defaults, because the schema was what we were building that day. The literal
+instruction named day 2 precisely so this could not be deferred behind the crypto layer,
+and it was deferred anyway.
+
+**Resolution:** `dwaar/crypto/jcs.py` (RFC 8785), `dwaar/crypto/mandate.py` (the ten-field
+signed payload), and `tests/crypto/test_mandate_vector.py` pinning the exact canonical
+string and its sha256. Day 4 builds RFC 9421 and the chain signer *around* these rather than
+beside them — two canonicalisers that must agree is the same masking problem that makes
+shared signing code between `dwaar/` and `zoo/` a bad idea.
+
+**Also worth recording, because it is the rule-4 failure class in miniature:** the first
+draft of that test carried an `EXPECTED_HASH` literal written from memory rather than
+computed. It failed on the first run. The canonical-string pin passed, which is what caught
+it. A hash nobody computed is a metric nobody measured.
+
+---
+
+### F-006 — CLOSED
+
+Resolved by porting rather than patching. `tools/gen_seed.py` is now this repo's own
+artifact and the source of truth for fixtures; the strategy package stays frozen, untracked,
+and byte-identical to what was received, so the divergence remains auditable instead of
+being papered over.
+
+Carried across in the port: F-001 (beat 3 moved to `apparel` as a warm-up plus a drift
+event, under the per-txn cap, `risk_score` asserted non-null), F-002 (beat 1 corrected to
+₹50,000 → ₹48,760), F-004 (HKDF-derived Ed25519 keypairs, public keys in the fixtures,
+private keys only under a gitignored `.keys/`, mandates genuinely signed).
+
+**A fourth defect found during the port, not previously recorded:** the original generator
+wrote `generated=datetime.now(timezone.utc)` into `SEED.txt` while printing *"Re-running
+reproduces byte-identical output."* The single file asserting determinism was the only file
+breaking it, and every downstream reproducibility claim rested on that assertion. There is
+no wall-clock read anywhere in the port, and `test_same_seed_produces_byte_identical_output`
+compares bytes rather than trusting the claim.
+
+The demo's `kill_container` target was also corrected from `dwaar-ledger`, which is not a
+container, to `dwaar-postgres`, which is — asserted against `docker-compose.yml` by
+`test_kill_target_matches_a_real_compose_container`, so the demo cannot again name a
+container that does not exist.

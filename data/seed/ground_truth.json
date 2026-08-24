@@ -1,0 +1,32 @@
+[
+  {
+    "agent_id": "agt_vjzs6d0ik7eu",
+    "archetype": "legit_shopper",
+    "held_out": false
+  },
+  {
+    "agent_id": "agt_tjtsci51500o",
+    "archetype": "card_tester",
+    "held_out": false
+  },
+  {
+    "agent_id": "agt_xkxo79wpt4hd",
+    "archetype": "budget_breacher",
+    "held_out": false
+  },
+  {
+    "agent_id": "agt_hs1aqdg8cesw",
+    "archetype": "injector",
+    "held_out": false
+  },
+  {
+    "agent_id": "agt_s2ibfngskuwr",
+    "archetype": "compromised",
+    "held_out": true
+  },
+  {
+    "agent_id": "agt_lszmxqvlebmd",
+    "archetype": "sleeper",
+    "held_out": true
+  }
+]

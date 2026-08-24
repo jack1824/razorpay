@@ -199,14 +199,18 @@ dwaar/            the service. never imports zoo.
 migrations/       numbered SQL. 0009 is the append-only control.
 tests/            including the three structural tests
 zoo/              agent archetypes. localhost only. sibling, never imported.
+tools/gen_seed.py  deterministic fixture + keypair generator
+data/seed/         its output. regenerate, never hand-edit.
 docs/
-  adr/0001-…      the Phase 1-2 decisions. Wins over the strategy package.
-  strategy/       the strategy package, read-only reference
+  adr/0001-…      the Phase 1-2 decisions
 THREAT_MODEL.md   written before any decision code
 FAIL_MATRIX.md    written before any decision code
 FAILURES.md       real-time, never backfilled
 ```
 
-`docs/strategy/` is vendored reference. This repo's own `THREAT_MODEL.md` and
-`FAIL_MATRIX.md` are at the root and govern the code; where they differ from the package,
-`docs/adr/0001-phase-1-2-decisions.md` records why.
+`THREAT_MODEL.md`, `FAIL_MATRIX.md`, `FAILURES.md` and `docs/adr/` are this repo's own
+engineering artifacts and govern the code. Several of them cite a planning package by path
+(`docs/strategy/…`) as the source of a decision. **That directory is intentionally not in
+this repository** — it holds pitch and evaluation-strategy material that has no business in
+public history. The citations are provenance, not dependencies: nothing in the build, the
+tests, or the runtime reads that path.

@@ -12,7 +12,7 @@ export DATABASE_URL_MIGRATE ?= postgresql://dwaar_owner:owner_pw@localhost:5432/
 export DATABASE_URL_APP     ?= postgresql://dwaar_app:app_pw@localhost:5432/dwaar
 export DATABASE_URL_SUPERUSER ?= postgresql://postgres:postgres_pw@localhost:5432/dwaar
 
-.PHONY: help up down logs migrate bootstrap-local test test-db lint fmt verify eval demo clean
+.PHONY: help up down logs migrate bootstrap-local seed test test-db lint fmt verify eval demo clean
 
 help:
 	@echo "Dwaar — authorization layer for AI agents that spend money"
@@ -21,6 +21,7 @@ help:
 	@echo "  make down      stop and remove containers"
 	@echo "  make logs      tail api logs"
 	@echo "  make migrate   apply migrations as the owner role"
+	@echo "  make seed      regenerate data/seed/ + .keys/ (deterministic)"
 	@echo "  make test      run the full test suite"
 	@echo "  make lint      ruff check"
 	@echo "  make fmt       ruff format"
@@ -57,6 +58,12 @@ migrate:
 bootstrap-local:
 	./scripts/init-db/local-bootstrap.sh
 	$(MAKE) migrate
+
+# Regenerate data/seed/ and .keys/. Deterministic: same seed, byte-identical output.
+# If `make test` reports data/seed/ differs from generator output, someone edited a
+# fixture instead of the generator. Regenerate; never hand-edit.
+seed:
+	$(PY) -m tools.gen_seed --out data/seed --seed 20260905
 
 test:
 	$(PY) -m pytest -q

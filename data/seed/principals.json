@@ -1,0 +1,32 @@
+[
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_ba6hyf9x47ud",
+    "public_key": "737985ed00ce91f9782e98a2bb90d56c1a5597db37ddca1f0ad2df6d7038f32f"
+  },
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_bdxzh39kf494",
+    "public_key": "d809aaf3e3be4a57ff6c9420f052c5bb4353e9988645be8965c36b2efde629b1"
+  },
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_4b3k8ex4ksj7",
+    "public_key": "be338be458b3be85188d254c33c0323d62ef44d8124ed4486584ade81472627f"
+  },
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_7xad9bvy5pod",
+    "public_key": "42e48f71229b67dc2a42cf7d702868193de5b3228b3dce745a243373cdb24cdf"
+  },
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_dyb6l1rd9y2a",
+    "public_key": "b4aaa2707e9a39711043bd9c3a57215af10c035d7e0f8894ead3c0cb58f9cee7"
+  },
+  {
+    "merchant_id": "mch_demo0001",
+    "principal_id": "prn_nko1umo06398",
+    "public_key": "cb6152efc4ce2e2a8bfc3c2d9d091974f09693c48c961af3e3dfee2497835222"
+  }
+]
