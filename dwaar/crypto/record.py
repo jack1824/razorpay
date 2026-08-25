@@ -22,6 +22,27 @@ What is signed, and why each exclusion is deliberate:
   is the identity that everything else references.
 - ``request_idempotency_key`` is **in**. It identifies *which* request this record answers.
   A record that could be repointed at a different request would be evidence of nothing.
+
+── Two fields that are present or absent, and why that is not a hole ────────────────────
+
+``bounded_amount_paise`` and ``tool`` (migration 0017) are included **if and only if the
+column is not NULL**. That is omit-if-absent, which the paragraph above forbids, so it
+needs the same justification ``dwaar/crypto/mandate.py`` gives for ``scopes`` rather than
+an exemption.
+
+The hazard the rule protects against is a signer and a verifier reasoning DIFFERENTLY
+about a default. Nullness of a column is not that: both read the same row and see the
+same NULL, so there is no case in which they can disagree about which form applies. The
+discriminator is in the data, not in anybody's interpretation of a default.
+
+The alternative was making them required, which would have re-canonicalised — and so
+invalidated — every record signed before today. Those signatures are correct and what
+they attest to has not changed.
+
+``bounded_amount_paise`` is load-bearing rather than decorative: it is the amount the
+decision STATED, and without it in the record the money invariant
+(``dwaar/invariants.py``) has one of its two sides missing. That is the gap F-038 lived
+in for four phases.
 """
 
 from __future__ import annotations
@@ -64,6 +85,11 @@ SIGNED_FIELDS: tuple[str, ...] = (
     "latency_us",
     "created_at",
 )
+
+#: Present in the payload IFF supplied and not None. Migration 0017. See the module
+#: docstring — this is the single exception to "materialise every default", and it exists
+#: so records signed before these fields existed keep verifying.
+OPTIONAL_FIELDS: tuple[str, ...] = ("bounded_amount_paise", "tool")
 
 # Fields that may legitimately be absent and get an explicit null rather than being omitted.
 # Under JCS an absent key and an explicit null are different bytes, so "omit if None" would
@@ -126,7 +152,12 @@ def build_payload(**fields: Any) -> dict[str, Any]:
 
         payload[name] = value
 
-    extra = set(fields) - set(SIGNED_FIELDS)
+    for name in OPTIONAL_FIELDS:
+        value = fields.get(name)
+        if value is not None:
+            payload[name] = value
+
+    extra = set(fields) - set(SIGNED_FIELDS) - set(OPTIONAL_FIELDS)
     if extra:
         raise ValueError(
             f"decision record payload has fields outside the signed set: {sorted(extra)}. "
@@ -154,4 +185,9 @@ def payload_from_row(row: dict[str, Any]) -> dict[str, Any]:
     nobody reads — and demo beat 6, which is literally
     ``UPDATE decision_records SET amount_paise = ...``, would verify clean.
     """
-    return build_payload(**{name: row[name] for name in SIGNED_FIELDS})
+    fields = {name: row[name] for name in SIGNED_FIELDS}
+    # `.get`, because a row read from a database that has not had migration 0017 applied
+    # has no such key at all — and a verifier that raised KeyError there would report an
+    # unmigrated database as a forged chain.
+    fields.update({name: row.get(name) for name in OPTIONAL_FIELDS})
+    return build_payload(**fields)

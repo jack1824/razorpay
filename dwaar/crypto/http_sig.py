@@ -35,7 +35,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-import time
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidSignature
@@ -43,6 +42,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+
+from dwaar import clock
 
 SIG_LABEL = "sig1"
 ALGORITHM = "ed25519"
@@ -121,7 +122,7 @@ def sign_request(
     """Produce the three headers a signed request carries."""
     params = SignatureParams(
         keyid=keyid,
-        created=created if created is not None else int(time.time()),
+        created=created if created is not None else clock.unix(),
         nonce=nonce,
         alg=ALGORITHM,
     )
@@ -235,7 +236,7 @@ def verify_request(
             f"{list(COVERED_COMPONENTS)}"
         )
 
-    current = now if now is not None else int(time.time())
+    current = now if now is not None else clock.unix()
     age = current - params.created
     if age > skew_seconds:
         raise SignatureError(f"signature created {age}s ago, outside the {skew_seconds}s window")

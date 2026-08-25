@@ -51,6 +51,19 @@ class InsufficientBudget(DwaarError):
     status_code = 200  # A deny is a rendered decision, not an HTTP error.
 
 
+class AmountInvariantViolation(LedgerError):
+    """What the ledger moved does not equal what the decision stated.
+
+    Fail-closed, and a subclass of ``LedgerError`` rather than a peer because it is the same
+    answer to the caller: we cannot tell you what just happened, so nothing happens. Stage 8
+    raises it inside stage 6's transaction, so the reservation rolls back with it.
+
+    Never a warning. This is the money invariant — it sits beside ``balance_after >= 0``,
+    and a system that logs one of those and continues is a system that has stopped enforcing
+    the other. See ``dwaar/invariants.py`` and FAILURES.md F-038.
+    """
+
+
 class ChainError(RepositoryError):
     """Decision chain integrity failure. Fail-closed: we do not write what we cannot chain."""
 

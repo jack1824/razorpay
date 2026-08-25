@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import json
 import random
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,6 +41,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from dwaar import clock
 from dwaar.crypto import http_sig
 from dwaar.crypto import keys as keymod
 
@@ -174,7 +174,7 @@ class Agent:
             path=AUTHORIZE_PATH,
             body=body,
             keyid=self.identity.agent_id,
-            created=int(time.time()),
+            created=clock.unix(),
             nonce=uuid.uuid4().hex,
         )
 
@@ -195,7 +195,9 @@ class Agent:
         headers = self._sign(body)
         headers["Content-Type"] = "application/json"
 
-        sent_at = time.time()
+        # An INSTANT, recorded in the manifest — so it comes from the seam. The
+        # response's own `latency_us` is the duration; this is not measuring one.
+        sent_at = clock.now().timestamp()
         try:
             response = await client.post(
                 f"{self.base_url}{AUTHORIZE_PATH}", content=body, headers=headers

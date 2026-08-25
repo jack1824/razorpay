@@ -33,3 +33,8 @@ venv/
 # Console
 console/node_modules/
 console/dist/
+
+# Demo beat 6 saves the amount it overwrote here so `make demo-restore` can put it
+# back. Local run state, not a fixture.
+data/demo/
+console/tsconfig.tsbuildinfo

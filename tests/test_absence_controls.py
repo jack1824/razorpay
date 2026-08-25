@@ -145,16 +145,20 @@ def test_a_stub_without_a_token_would_be_caught():
 
 # ── the make targets ────────────────────────────────────────────────────────────────
 
-def test_unimplemented_make_targets_exit_non_zero():
-    """A green stub is a control that is not there — the same failure as a hardcoded
-    metric, and it fails at the worst possible moment.
+#: Targets that exist in the Makefile but do not do the thing they are named for.
+#:
+#: EMPTY as of 30 August. `verify` landed on the 25th, `eval` on the 28th and `demo` on the
+#: 30th, and each left this tuple as it became real.
+#:
+#: Kept rather than deleted, because the mechanism is the point and the next stub needs an
+#: obvious home. A green stub is a control that is not there — the same failure mode as a
+#: hardcoded metric, and it fails at the worst possible moment.
+UNIMPLEMENTED_TARGETS: tuple[str, ...] = ()
 
-    `verify` landed on 25 Aug and `eval` on 28 Aug; each moved to the list below as it
-    became real. `demo` is the last one, and until it drives actual beats it must keep
-    exiting non-zero.
-    """
+
+def test_unimplemented_make_targets_exit_non_zero():
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
-    for target in ("demo",):
+    for target in UNIMPLEMENTED_TARGETS:
         block = re.search(rf"^{target}:\n((?:\t.*\n)+)", makefile, re.M)
         assert block, f"no {target} target in the Makefile"
         assert "exit 2" in block.group(1), (
@@ -164,11 +168,11 @@ def test_unimplemented_make_targets_exit_non_zero():
 
 @pytest.mark.parametrize(
     ("target", "must_invoke"),
-    [("verify", "verify_cli"), ("eval", "eval.report")],
+    [("verify", "verify_cli"), ("eval", "eval.report"), ("demo", "tools.demo")],
 )
 def test_a_landed_target_is_no_longer_a_stub(target, must_invoke):
-    """`verify` landed 25 Aug, `eval` 28 Aug. If either regressed to `exit 2`, an
-    acceptance criterion would be silently gone — and a target that exits 2 is
+    """`verify` landed 25 Aug, `eval` 28 Aug, `demo` 30 Aug. If any regressed to `exit 2`,
+    an acceptance criterion would be silently gone — and a target that exits 2 is
     indistinguishable from one that was never built."""
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     block = re.search(rf"^{target}:\n((?:\t.*\n)+)", makefile, re.M)

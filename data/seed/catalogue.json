@@ -252,5 +252,19 @@
     "name": "Everyday Cotton T-Shirt",
     "price_paise": 47500,
     "sku": "SKU9002"
+  },
+  {
+    "_beat_1": "the baseline purchase",
+    "category": "groceries",
+    "name": "Weekly Grocery Basket",
+    "price_paise": 124000,
+    "sku": "SKU9004"
+  },
+  {
+    "_beat_2": "₹12,000 against a ₹5,000 per-txn cap — the arithmetic denial",
+    "category": "household",
+    "name": "Convection Microwave Oven",
+    "price_paise": 1200000,
+    "sku": "SKU9003"
   }
 ]

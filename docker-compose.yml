@@ -19,6 +19,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-dwaar}
       DWAAR_OWNER_PASSWORD: ${DWAAR_OWNER_PASSWORD:-owner_pw}
       DWAAR_APP_PASSWORD: ${DWAAR_APP_PASSWORD:-app_pw}
+      DWAAR_EXPLAINER_PASSWORD: ${DWAAR_EXPLAINER_PASSWORD:-explainer_pw}
     volumes:
       # Runs once, as superuser, on an empty data directory. Creates the two roles.
       - ./scripts/init-db:/docker-entrypoint-initdb.d:ro
@@ -68,6 +69,38 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+
+  # The container demo beat 5 kills.
+  #
+  # A separate service and a separate DATABASE ROLE. `dwaar_explainer` holds SELECT on
+  # decision_records and INSERT on explanations and nothing else — it cannot write a
+  # decision, edit one, or touch the ledger. See migration 0018.
+  #
+  # `docker kill dwaar-llm-explainer` must change nothing about decisions, and that is a
+  # property of the grant rather than of this file. `restart: unless-stopped` is deliberately
+  # ABSENT: a container that comes straight back would make the beat unwatchable.
+  #
+  # GEMINI_API_KEY is optional. Without it the worker writes the deterministic fallback, so
+  # `docker compose up` on a clean machine produces explanations with no credential and no
+  # network — which is also what the test suite runs against.
+  explainer:
+    build: .
+    container_name: dwaar-llm-explainer
+    command: ["python", "-m", "dwaar.explain.worker"]
+    environment:
+      DATABASE_URL_EXPLAINER: postgresql://dwaar_explainer:${DWAAR_EXPLAINER_PASSWORD:-explainer_pw}@postgres:5432/${POSTGRES_DB:-dwaar}
+      REDIS_URL: redis://redis:6379/0
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # After the API, because the API applies migrations — including 0018, which creates
+      # the table this writes to and the grants it depends on.
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:

@@ -44,6 +44,7 @@ from pathlib import Path
 
 import httpx
 
+from dwaar import clock
 from zoo import catalogue as cataloguemod
 from zoo.agents import ARCHETYPES, LEGITIMATE
 from zoo.base import Agent, Attempt, assert_loopback
@@ -175,16 +176,21 @@ async def main_async(args: argparse.Namespace) -> int:
 
         psp = RedisObservationStore(Redis.from_url(args.redis_url))
 
-    started = time.time()
+    # perf_counter for the DURATION, the seam for the INSTANT. They are different
+    # questions and one variable was answering both: `elapsed` wanted a monotonic
+    # measure and `run_id` wanted a wall-clock stamp, and a clock step would have
+    # corrupted whichever one it hit.
+    started_at = clock.now()
+    started = time.perf_counter()
     jitter = random.Random(args.seed ^ 0xABCDEF)
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         await asyncio.gather(
             *(run_agent(agent, client, psp, jitter=jitter) for agent in agents)
         )
-    elapsed = time.time() - started
+    elapsed = time.perf_counter() - started
 
-    run_id = f"{args.seed}-{int(started)}"
+    run_id = f"{args.seed}-{int(started_at.timestamp())}"
     TRAFFIC_DIR.mkdir(parents=True, exist_ok=True)
     out = Path(args.out) if args.out else TRAFFIC_DIR / f"{run_id}.jsonl"
 

@@ -48,7 +48,8 @@ from dwaar.authorize.types import (
 from dwaar.crypto import record as recordmod
 from dwaar.crypto.signer import Signer
 from dwaar.db.repositories import decision_records
-from dwaar.errors import ChainError
+from dwaar.errors import AmountInvariantViolation, ChainError
+from dwaar.invariants import AmountFacts, check_amount_conserved
 
 STAGE_NAME = "write_decision_record"
 
@@ -73,6 +74,7 @@ async def write_decision_record(
     agent_id: str,
     amount_paise: int | None,
     request_idempotency_key: str | None,
+    tool: str | None = None,
 ) -> RecordResult:
     if mandate.merchant_id is None or mandate.mandate_hash is None:
         # No resolved merchant means no chain to write to — merchant_id is the shard key.
@@ -80,6 +82,35 @@ async def write_decision_record(
         raise ChainError(
             "cannot write a decision record without a resolved merchant; an unattributable "
             "request is a security event, not an authorization decision"
+        )
+
+    # ── The money invariant, BEFORE anything is written ─────────────────────────────
+    #
+    # What the ledger moved must equal what the decision stated, with the BOUND amount —
+    # not the requested one — as the stated amount. Checked here rather than in a test
+    # because a test proves it held on the cases someone thought of, and an assertion
+    # proves it holds on the cases nobody did. F-038 was in the second set for four phases:
+    # a `bound` told the agent ₹500 and debited ₹1,800, and every surface except these two
+    # numbers agreed.
+    #
+    # A violation is a FAILED REQUEST, not a logged warning. Stage 8 shares its transaction
+    # with stage 6, so raising here rolls the reservation back — nothing moved and nothing
+    # was written, which is the only safe answer when the system cannot say what it just
+    # did. `migrations/0017` carries the same rule as a CHECK constraint; this raises first
+    # because it produces an error a reader can act on and because it still fires against a
+    # database where the migration has not been applied.
+    violation = check_amount_conserved(
+        AmountFacts(
+            decision=decision.decision,
+            requested_paise=amount_paise,
+            stated_paise=decision.bounded_amount_paise,
+            budget_before=ledger.budget_before if ledger else None,
+            budget_after=ledger.budget_after if ledger else None,
+        )
+    )
+    if violation is not None:
+        raise AmountInvariantViolation(
+            f"refusing to record a decision that does not conserve money: {violation}"
         )
 
     await decision_records.lock_chain(conn, mandate.merchant_id)
@@ -109,6 +140,14 @@ async def write_decision_record(
         features=features.features if features else {},
         policy_version=policy.policy_version if policy else None,
         amount_paise=amount_paise,
+        # The amount the decision STATED. Present in the signed payload only when a
+        # bound applied; without it the invariant above has one side missing and a
+        # reader has no way to check the order that was created against the decision.
+        bounded_amount_paise=decision.bounded_amount_paise,
+        # The MCP tool named, when the request arrived through dwaar/mcp/. A record
+        # saying `mcp.scope.money.outbound` without naming the tool is evidence of a
+        # category of refusal rather than of a refusal.
+        tool=tool,
         budget_before=ledger.budget_before if ledger else None,
         budget_after=ledger.budget_after if ledger else None,
         degraded_mode=degraded,

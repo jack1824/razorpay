@@ -207,12 +207,33 @@ def make_mandate(make_agent, make_principal):
         max_total_paise: int = 5_000_000,
         max_per_txn_paise: int | None = None,
         merchant_id: str = "mch_test0001",
+        scopes: list[str] | None = None,
+        allow_categories: list[str] | None = None,
+        deny_categories: list[str] | None = None,
     ):
         # The schema enforces max_per_txn <= max_total. A fixed default would make every
         # test that lowers the total fail on a CHECK violation that has nothing to do with
         # what it is testing, so the per-txn cap follows the total unless asked otherwise.
         if max_per_txn_paise is None:
             max_per_txn_paise = min(500_000, max_total_paise)
+
+        # Every signed term is a PARAMETER, so no test ever needs to reach past this
+        # builder and write a column directly.
+        #
+        # F-042 happened because `scopes` was not one: a test needed a mandate with scopes,
+        # the fixture could not make one, and the shortest path was
+        # `UPDATE mandates SET scopes = ...` as the owner — which left the column disagreeing
+        # with the bytes the principal signed. The 926-test suite stayed green and
+        # `make verify` was the only thing that noticed. That was the third fixture defect of
+        # exactly that shape (F-018, then two more), and the shortcut was identical every
+        # time: writing a column instead of re-signing the row.
+        #
+        # A shortcut that does not exist cannot be taken at 2am. So the fix is here rather
+        # than in the test that took it.
+        if allow_categories is None:
+            allow_categories = ["groceries", "apparel"]
+        if deny_categories is None:
+            deny_categories = ["gift_cards"]
 
         from dwaar.crypto import keys as keymod
         from dwaar.crypto import mandate as mandatemod
@@ -236,11 +257,12 @@ def make_mandate(make_agent, make_principal):
             agent_id=agent["agent_id"],
             max_total_paise=max_total_paise,
             max_per_txn_paise=max_per_txn_paise,
-            allow_categories=["groceries", "apparel"],
-            deny_categories=["gift_cards"],
+            allow_categories=allow_categories,
+            deny_categories=deny_categories,
             substitution_tolerance="same_price",
             expires_at=expires_at,
             nonce=uuid.uuid4().hex,
+            scopes=scopes,
         )
         canonical = mandatemod.canonical_json(payload)
         principal_key = keymod.derive_private_key(
@@ -259,9 +281,10 @@ def make_mandate(make_agent, make_principal):
             canonical_json=canonical,
             signature=principal_key.sign(canonical.encode()),
             mandate_hash=mandatemod.mandate_hash(payload),
-            allow_categories=["groceries", "apparel"],
-            deny_categories=["gift_cards"],
+            allow_categories=allow_categories,
+            deny_categories=deny_categories,
             substitution_tolerance="same_price",
+            scopes=scopes,
         )
 
     return _make
@@ -332,6 +355,7 @@ def write_record(signer):
     from dwaar.crypto import record as recordmod
     from dwaar.crypto.signer import ensure_registered
     from dwaar.db.repositories import decision_records
+    from dwaar.invariants import AmountFacts, check_amount_conserved
 
     async def _write(conn, *, merchant_id, mandate, decision="allow", **overrides):
         await ensure_registered(conn, signer)
@@ -362,6 +386,48 @@ def write_record(signer):
             "created_at": datetime.now(UTC),
         }
         fields.update(overrides)
+
+        # ── The ledger columns are DERIVED, not left to the caller ──────────────────
+        #
+        # `write_record(amount_paise=124_000)` used to produce an `allow` for ₹1,240 with
+        # both balance columns NULL — a record saying money was authorised and the ledger
+        # never consulted. Four tests in `test_append_only_grant.py` were built on one, and
+        # the trigger added in migration 0017 refused all four the moment it existed.
+        #
+        # That is the same shape as F-042 and it has the same fix: the fixture should not
+        # be able to build an incoherent row, rather than every caller remembering to pass
+        # three consistent numbers. A test that wants an allow for an amount gets a
+        # reservation for that amount; one that wants something else says so explicitly.
+        stated = fields.get("bounded_amount_paise") or fields.get("amount_paise")
+        moves_money = decision in ("allow", "bound") and (stated or 0) > 0
+        if moves_money and "budget_before" not in overrides and "budget_after" not in overrides:
+            opening = mandate["max_total_paise"]
+            fields["budget_before"] = opening
+            fields["budget_after"] = opening - stated
+        if decision == "bound" and fields.get("bounded_amount_paise") is None:
+            raise AssertionError(
+                "write_record(decision='bound') needs bounded_amount_paise: it is the "
+                "figure the agent was told, and a bound record without it fails the money "
+                "invariant. See dwaar/invariants.py."
+            )
+
+        # Checked HERE, before the insert, so the failure names the fixture rather than
+        # surfacing as a plpgsql RAISE from inside a trigger three frames down.
+        violation = check_amount_conserved(
+            AmountFacts(
+                decision=fields["decision"],
+                requested_paise=fields.get("amount_paise"),
+                stated_paise=fields.get("bounded_amount_paise"),
+                budget_before=fields.get("budget_before"),
+                budget_after=fields.get("budget_after"),
+            )
+        )
+        assert violation is None, (
+            f"this fixture was asked to write a record that does not conserve money: "
+            f"{violation}. A fixture a control would refuse cannot be used to test that "
+            f"control — see FAILURES.md F-018."
+        )
+
         payload = recordmod.build_payload(**fields)
         canonical = recordmod.canonical_json(payload)
         digest = recordmod.payload_hash(payload)

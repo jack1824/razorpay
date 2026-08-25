@@ -21,13 +21,11 @@ in that window say something else.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
-from dwaar import __version__
+from dwaar import __version__, clock, outbox
 from dwaar.components import BY_NAME, Severity, overall
 
 router = APIRouter()
@@ -50,7 +48,7 @@ def _report(name: str, up: bool, reason: str | None, checked_at: str) -> dict:
 @router.get("/health")
 async def health(request: Request) -> dict:
     app = request.app
-    now = datetime.now(UTC).isoformat()
+    now = clock.now().isoformat()
     components: dict[str, dict] = {}
 
     pool = getattr(app.state, "pool", None)
@@ -121,9 +119,18 @@ async def health(request: Request) -> dict:
     if detector is not None:
         components["injection_detector"]["model_version"] = detector.model_version
 
-    # Not built yet. Reported as down with its real fail mode, so the console shows the
-    # truth rather than an empty space that reads as healthy.
-    components["explainer"] = _report("explainer", False, "not implemented", now)
+    # The explainer, reported from Redis rather than from a flag. A consumer group records
+    # how long each consumer has been idle, so "is it running" is a fact the queue already
+    # holds — not a heartbeat somebody has to remember to send, which would be a second
+    # thing that can be stale on its own.
+    #
+    # Its severity is NOMINAL even when down, which is `dwaar/components.py`'s one genuinely
+    # interesting entry: the fail matrix says NO EFFECT on decisions and the console spec
+    # asks for amber. Both are right about different things. So it reports `status: down`
+    # and can never make the gateway degraded — which is exactly what demo beat 5 shows.
+    explainer = await outbox.explainer_status(redis)
+    components["explainer"] = _report("explainer", explainer["up"], explainer["reason"], now)
+    components["explainer"]["backlog"] = explainer["backlog"]
 
     status = overall([Severity(component["severity"]) for component in components.values()])
 

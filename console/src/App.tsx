@@ -1,24 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Agent, DecisionSummary, Health } from "./types";
+import type { Agent, DecisionSummary, Health, McpCall, Verification } from "./types";
 import { DecisionStream } from "./DecisionStream";
 import { AgentRoster } from "./AgentRoster";
 import { DecisionDetail } from "./DecisionDetail";
+import { ChainVerifier } from "./ChainVerifier";
+import { McpPanel } from "./McpPanel";
+import { SystemHealth } from "./SystemHealth";
 
 const MERCHANT = "mch_demo0001";
 const MAX_ROWS = 200;
 
-type Tab = "stream" | "roster";
+const TABS = [
+  ["stream", "Decision stream"],
+  ["roster", "Agents"],
+  ["mcp", "MCP enforcement"],
+  ["chain", "Chain verifier"],
+  ["health", "System health"],
+] as const;
+
+type Tab = (typeof TABS)[number][0];
 
 /**
- * Two screens and a detail panel. No router, no state library, no component library —
+ * Five screens and a detail panel. No router, no state library, no component library —
  * a tab switch is a `useState`, and anything more would be scope for zero benefit at
  * 1080p on a projector.
+ *
+ * The tab ORDER is the demo order: stream (beats 1-4), agents (the budget bars), MCP
+ * (beat 7), chain (beat 6), health (beat 5). `make demo` drives the console through them
+ * on the timeline's schedule, so the presenter talks instead of clicking.
  */
 export function App() {
   const [tab, setTab] = useState<Tab>("stream");
   const [decisions, setDecisions] = useState<DecisionSummary[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [health, setHealth] = useState<Health | null>(null);
+  const [verification, setVerification] = useState<Verification | null>(null);
+  const [mcp, setMcp] = useState<{ calls: McpCall[]; known_tools: string[] }>({
+    calls: [],
+    known_tools: [],
+  });
   const [selected, setSelected] = useState<string | null>(null);
   const seen = useRef<Set<number>>(new Set());
 
@@ -35,13 +55,22 @@ export function App() {
     let alive = true;
     const poll = async () => {
       try {
-        const [rosterResponse, healthResponse] = await Promise.all([
-          fetch(`/v1/console/agents?merchant_id=${MERCHANT}`),
-          fetch("/health"),
-        ]);
+        const [rosterResponse, healthResponse, mcpResponse, verifyResponse] =
+          await Promise.all([
+            fetch(`/v1/console/agents?merchant_id=${MERCHANT}`),
+            fetch("/health"),
+            fetch(`/v1/console/mcp?merchant_id=${MERCHANT}`),
+            // Server-side cached; a cold call re-verifies the whole chain and takes
+            // seconds, so the panel shows the result's AGE rather than pretending it is
+            // live. Polled unconditionally so demo beat 6 goes red while the presenter is
+            // still on it, rather than when someone remembers to click the tab.
+            fetch(`/v1/console/verify?merchant_id=${MERCHANT}`),
+          ]);
         if (!alive) return;
         setAgents((await rosterResponse.json()).agents ?? []);
         setHealth(await healthResponse.json());
+        setMcp(await mcpResponse.json());
+        setVerification(await verifyResponse.json());
       } catch {
         // A blip must not take the console down: it is the debugging tool for every
         // remaining phase, and one that dies with the thing it watches is useless
@@ -115,21 +144,25 @@ export function App() {
           </span>
         )}
         <nav>
-          <button data-active={tab === "stream"} onClick={() => setTab("stream")}>
-            Decision stream
-          </button>
-          <button data-active={tab === "roster"} onClick={() => setTab("roster")}>
-            Agents
-          </button>
+          {TABS.map(([name, label]) => (
+            <button key={name} data-active={tab === name} onClick={() => setTab(name)}>
+              {label}
+              {/* The chain verifier's tab carries its verdict, so a break is visible from
+                  whichever screen is up when the tamper happens. */}
+              {name === "chain" && verification && !verification.ok && (
+                <span className="tab-alert">BROKEN</span>
+              )}
+            </button>
+          ))}
         </nav>
       </header>
 
       <main>
-        {tab === "stream" ? (
-          <DecisionStream decisions={decisions} onSelect={setSelected} />
-        ) : (
-          <AgentRoster agents={agents} health={health} />
-        )}
+        {tab === "stream" && <DecisionStream decisions={decisions} onSelect={setSelected} />}
+        {tab === "roster" && <AgentRoster agents={agents} health={health} />}
+        {tab === "mcp" && <McpPanel calls={mcp.calls} knownTools={mcp.known_tools} />}
+        {tab === "chain" && <ChainVerifier verification={verification} />}
+        {tab === "health" && <SystemHealth health={health} />}
       </main>
 
       {selected && <DecisionDetail recordId={selected} onClose={close} />}

@@ -49,7 +49,7 @@ _COLUMNS = (
     "agent_id, principal_id, mandate_hash, request_digest, decision, reason_code, "
     "rule_fired, risk_score, model_version, injection_flag, amount_paise, budget_before, "
     "budget_after, features, policy_version, latency_us, degraded_mode, stages_executed, "
-    "canonical_json, request_idempotency_key, created_at"
+    "canonical_json, request_idempotency_key, bounded_amount_paise, tool, created_at"
 )
 
 VALID_DECISIONS = frozenset({"allow", "bound", "throttle", "step_up", "deny"})
@@ -212,8 +212,8 @@ async def append_signed(
         f"  rule_fired, risk_score, model_version, injection_flag, amount_paise, "
         f"  budget_before, budget_after, features, policy_version, latency_us, "
         f"  degraded_mode, stages_executed, canonical_json, request_idempotency_key, "
-        f"  created_at"
-        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
+        f"  bounded_amount_paise, tool, created_at"
+        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,"
         f"        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
         f"ON CONFLICT (mandate_hash, request_idempotency_key) "
         f"  WHERE request_idempotency_key IS NOT NULL DO NOTHING "
@@ -245,6 +245,10 @@ async def append_signed(
             payload["stages_executed"],
             canonical_json,
             payload["request_idempotency_key"],
+            # Present in the payload only when non-NULL (migration 0017), so the column
+            # is read with `.get` and the two cannot disagree about absence.
+            payload.get("bounded_amount_paise"),
+            payload.get("tool"),
             created_at,
         ),
     )

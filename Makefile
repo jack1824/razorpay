@@ -23,8 +23,8 @@ TRAFFIC_SEED ?= 20260828
 EVAL_SEED ?= 20260901
 
 .PHONY: help up down logs migrate bootstrap-local seed traffic traffic-eval train \
-        train-injection \
-        test test-db lint fmt verify eval demo clean
+        train-injection explainer \
+        test test-db lint fmt verify eval demo demo-restore clean
 
 help:
 	@echo "Dwaar — authorization layer for AI agents that spend money"
@@ -47,7 +47,9 @@ help:
 	@echo ""
 	@echo "  make verify    verify the decision chain"
 	@echo "  make eval      the honest numbers (importances, components, FP cost)"
-	@echo "  make demo      drive the demo beats           [day 11 — not implemented]"
+	@echo "  make demo      drive demo beats 1-6 on the timeline's own schedule"
+	@echo "  make demo-restore  undo beat 6's tamper"
+	@echo "  make explainer     run the async explainer (EXPLAINER_ARGS=--no-model)"
 
 up:
 	$(COMPOSE) up -d --build
@@ -133,11 +135,11 @@ clean:
 	$(COMPOSE) down -v
 	rm -rf .pytest_cache .ruff_cache .hypothesis **/__pycache__
 
-# ── Not yet implemented ─────────────────────────────────────────────────────────────
+# ── The three that were stubs ───────────────────────────────────────────────────────
 #
-# These exit 2, deliberately. A stub that exits 0 is a green light for something that
-# does not exist — the same failure mode as a hardcoded metric, and it fails at the
-# worst possible moment. Non-zero until the thing is real.
+# All three exited 2 until the thing behind them existed, because a stub that exits 0 is
+# a green light for something that is not there — the same failure mode as a hardcoded
+# metric, and it fails at the worst possible moment. `make demo` was the last one.
 
 # The independent verifier. Read-only connection, no write path, no cooperation from the
 # running service required — that is what makes its report worth anything.
@@ -153,10 +155,24 @@ verify:
 eval:
 	$(PY) -m eval.report
 
+# Drives beats 1-6 from data/seed/timeline.json on its own schedule, so the presenter
+# talks rather than clicks. Beat 7 (MCP) stays MANUAL — it is the one worth pausing on.
+#
+# Every expectation in the timeline is asserted against what the API actually returned, and
+# a mismatch is printed loudly and exits non-zero. A runner that echoed the timeline's own
+# expectations would be an expensive way to read a JSON file.
+#
+# Beat 6 tampers a committed record from a superuser connection, which is destructive and
+# leaves `make verify` red. That is correct — and `make demo-restore` puts it back.
 demo:
-	@echo "make demo — NOT IMPLEMENTED"
-	@echo ""
-	@echo "  Lands day 11 (docs/strategy/BUILD_PLAN.md). Depends on the console and a"
-	@echo "  working authorize path (day 6)."
-	@echo "  Blocked on FAILURES.md F-006: the corrected demo timeline has not arrived."
-	@exit 2
+	$(PY) -m tools.demo $(DEMO_ARGS)
+
+# Undo beat 6's tamper, by exactly the means it was made.
+demo-restore:
+	$(PY) -m tools.demo --restore
+
+# The async explainer. Reads decisions off Redis, writes `explanations`, and connects with
+# a role that holds SELECT on decision_records and INSERT on explanations and nothing else.
+# `--no-model` needs no API key and no network.
+explainer:
+	$(PY) -m dwaar.explain.worker $(EXPLAINER_ARGS)

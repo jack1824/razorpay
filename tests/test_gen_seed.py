@@ -224,11 +224,24 @@ def test_beat_3_drift_event_is_under_the_per_txn_cap(generated):
 
 
 def test_beat_3_asserts_a_non_null_risk_score(generated):
-    """The exact mirror of beat 2. Together they are the demo's clearest thirty seconds."""
+    """The exact mirror of beat 2. Together they are the demo's clearest thirty seconds.
+
+    Beat 2 refuses with `risk_score IS NULL` — arithmetic, the model never consulted. Beat
+    3.1 refuses with a non-null one — behaviour, which nothing deterministic could have
+    caught. Same verdict, opposite evidence, and the pair is worthless if either half moves.
+
+    The expectation was briefly rewritten to `step_up` on the strength of a 0.67 measured
+    against an uncleared rolling window, and put back when the same pattern scored 1.0 from
+    a clean one. See F-044: a spec rewritten to match an artifact is the failure mode
+    `eval/PREDICTIONS.md` exists to prevent, arriving on a number nobody had registered.
+    """
     warm_up, drift = _beats(generated["timeline"], 3.0)[0], _beats(generated["timeline"], 3.1)[0]
     assert warm_up["expect"] == "allow"
     assert drift["expect"] == "deny"
-    assert drift["expect_rule"] == "behavioural_drift"
+    assert drift["expect_rule"] == "policy.baseline.risk_deny", (
+        "the namespaced id the baseline policy actually fires. `behavioural_drift` was "
+        "written before dwaar/policy/baseline.py existed and names no rule the system has."
+    )
     assert drift["expect_risk_score_non_null"] is True
 
     breach = _beats(generated["timeline"], 2)[0]

@@ -38,12 +38,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from psycopg import AsyncConnection
 
-from dwaar import idempotency
+from dwaar import clock, idempotency
 from dwaar.authorize.stages import authority as authority_stage
 from dwaar.authorize.stages import decision as decision_stage
 from dwaar.authorize.stages import features as features_stage
@@ -75,6 +75,10 @@ log = get_logger("dwaar.authorize")
 # Not a stage in the ARCHITECTURE table: it is a short-circuit that runs before the work,
 # so it is named separately and still timed.
 REPLAY_STAGE = "replay_lookup"
+
+#: Policy verdicts that may consume budget. Everything else — including a verdict that
+#: does not exist yet — reserves nothing. See the stage 6 comment below and F-043.
+RESERVING_VERDICTS: frozenset[str] = frozenset({"permit", "bound"})
 
 #: Also not a stage in the ARCHITECTURE table. It writes the rolling window that stage 3
 #: reads, and it runs before the gate so the window is not conditioned on the gate's own
@@ -139,6 +143,10 @@ class PipelineOutcome:
     decision: Decision
     record_id: str | None = None
     seq: int | None = None
+    merchant_id: str | None = None
+    """The chain this record landed in. Carried out so a caller can address the record
+    without re-resolving the mandate — the explainer's stream message needs it, and
+    re-deriving it in the route would be a second place that could disagree."""
     budget_remaining_paise: int | None = None
     latency_us: int = 0
     stage_timings_us: dict[str, int] = field(default_factory=dict)
@@ -173,6 +181,7 @@ def _replayed(row, timer: _Timer, started: float) -> PipelineOutcome:
         ),
         record_id=str(row["record_id"]),
         seq=row["seq"],
+        merchant_id=row["merchant_id"],
         budget_remaining_paise=row["budget_after"],
         latency_us=int((time.perf_counter() - started) * 1_000_000),
         stage_timings_us=timer.timings,
@@ -222,7 +231,7 @@ async def authorize(
 ) -> PipelineOutcome:
     """Run the pipeline. The caller owns the transaction and commits on success."""
     started = time.perf_counter()
-    now = now or datetime.now(UTC)
+    now = now or clock.now()
     timer = _Timer()
     degraded: list[str] = []
     executed: list[str] = []
@@ -355,7 +364,20 @@ async def authorize(
                 degraded.append(policy.degraded)
 
             # ── 6. budget. Only if 1-5 permit. ──────────────────────────────────────
-            if policy.verdict != "deny" and not (injection and injection.flagged):
+            #
+            # A WHITELIST of verdicts that may reserve, not `!= "deny"`.
+            #
+            # F-043: the condition used to be `policy.verdict != "deny"`, and stage 7
+            # returns `throttle` and `step_up` BEFORE it ever looks at the ledger. So an
+            # agent told "come back later" had already been debited, and its retry — a
+            # different idempotency key — was debited again. 1,070 throttled and 23
+            # stepped-up records in the local database had moved money for a decision that
+            # authorised none.
+            #
+            # That is F-041's shape as well as F-038's: a default reached by falling off the
+            # end of a chain of positive checks is a default nobody chose. Enumerating the
+            # verdicts that MAY spend means a verdict added later lands on the strict side.
+            if policy.verdict in RESERVING_VERDICTS and not (injection and injection.flagged):
                 # Reserve what the policy AUTHORISED, not what the agent asked for.
                 #
                 # A `bound` verdict has reduced the request. Reserving the original figure
@@ -428,6 +450,7 @@ async def authorize(
             agent_id=request.agent_id,
             amount_paise=request.amount_paise,
             request_idempotency_key=request_key,
+            tool=request.tool,
         ),
     )
     executed.append(record_stage.STAGE_NAME)
@@ -448,6 +471,7 @@ async def authorize(
         decision=decision,
         record_id=written.record_id,
         seq=written.seq,
+        merchant_id=mandate.merchant_id,
         budget_remaining_paise=ledger.budget_after if ledger else None,
         latency_us=total_us,
         stage_timings_us=timer.timings,

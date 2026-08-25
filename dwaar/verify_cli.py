@@ -25,6 +25,12 @@ yourself, against the same database, with no cooperation from the running servic
 3. **Signatures verify**, resolved through the `signing_key_id` each record names, so a key
    rotation does not invalidate history.
 4. **Ledger invariants**: no negative balance, and `sum(deltas) == balance` per mandate.
+5. **The money invariant**, recomputed across every record: what the ledger moved equals
+   what the decision stated, with the BOUND amount as the stated amount. This is F-038's
+   structural fix — see ``dwaar/invariants.py``. It is not a tamper check; `budget_before`
+   and `budget_after` are inside the signed payload and check 1 already covers editing
+   them. It catches the application writing a row that was wrong when it was written, which
+   no signature can detect: a signature attests that we said it, not that it was true.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ from psycopg.rows import dict_row
 
 from dwaar.crypto import record as recordmod
 from dwaar.crypto.integrity import REGISTRY, IntegrityError, assert_columns_match_canonical
+from dwaar.invariants import AmountFacts, check_amount_conserved
 
 
 @dataclass
@@ -49,6 +56,16 @@ class Findings:
     checked: dict[str, int] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
     gaps: dict[str, list[int]] = field(default_factory=dict)
+
+    legacy: dict[str, int] = field(default_factory=dict)
+    """Invariant violations in records written BEFORE the invariant was enforced, counted
+    by code.
+
+    Reported and not forgiven. `migrations/0017` records a per-chain watermark, so "before"
+    is a fact in the database rather than a judgement made here — a violation above the
+    watermark is a failure. Without the watermark this check would have to either fail
+    forever on history or treat the two known defect classes as permanently excused, and
+    "permanently excused" means a reintroduction next month is reported as a note."""
 
     @property
     def ok(self) -> bool:
@@ -179,6 +196,75 @@ def check_chains(conn: psycopg.Connection, findings: Findings, merchant: str | N
     findings.checked["decision_records.chain"] = total
 
 
+AMOUNT_INVARIANT = "amount_conserved"
+
+
+def check_amount_conservation(
+    conn: psycopg.Connection, findings: Findings, merchant: str | None = None
+) -> None:
+    """Recompute the money invariant over every record. F-038's structural fix.
+
+    One query rather than one per merchant: the demo database carries 265 chains and a
+    per-chain round trip would make the verifier slower than the thing it verifies.
+
+    The rule itself is NOT written here. It lives in `dwaar/invariants.py` and the write
+    path calls the same function, because two hand-written copies of a money rule drift and
+    the drift is money moving without anyone noticing — which is the defect this exists to
+    close, reintroduced by the fix for it.
+    """
+    try:
+        baselines = {
+            row["merchant_id"]: row["max_seq"]
+            for row in conn.execute(
+                "SELECT merchant_id, max_seq FROM invariant_baselines WHERE invariant = %s",
+                (AMOUNT_INVARIANT,),
+            ).fetchall()
+        }
+    except psycopg.errors.UndefinedTable:
+        # Say so rather than skip. A verifier that quietly drops a check on an older schema
+        # prints the same PASS as one that ran it — F-014's failure mode, in the one tool
+        # whose entire value is that its report can be trusted.
+        conn.rollback()
+        findings.fail(
+            "invariant_baselines is missing: this database predates migration 0017, so the "
+            "money invariant cannot be checked against it"
+        )
+        return
+
+    sql = (
+        "SELECT merchant_id, seq, decision, amount_paise, bounded_amount_paise, "
+        "       budget_before, budget_after "
+        "FROM decision_records"
+    )
+    params: tuple = ()
+    if merchant is not None:
+        sql += " WHERE merchant_id = %s"
+        params = (merchant,)
+
+    rows = conn.execute(sql, params).fetchall()
+    findings.checked["decision_records.amount"] = len(rows)
+
+    for row in rows:
+        violation = check_amount_conserved(
+            AmountFacts(
+                decision=row["decision"],
+                requested_paise=row["amount_paise"],
+                stated_paise=row["bounded_amount_paise"],
+                budget_before=row["budget_before"],
+                budget_after=row["budget_after"],
+            )
+        )
+        if violation is None:
+            continue
+        watermark = baselines.get(row["merchant_id"])
+        if watermark is not None and row["seq"] <= watermark:
+            findings.legacy[violation.code] = findings.legacy.get(violation.code, 0) + 1
+            continue
+        findings.fail(
+            f"decision_records seq={row['seq']} ({row['merchant_id']}): {violation}"
+        )
+
+
 def check_ledger_invariants(conn: psycopg.Connection, findings: Findings) -> None:
     negative = conn.execute(
         "SELECT count(*) AS n FROM budget_ledger WHERE balance_after < 0"
@@ -205,6 +291,7 @@ def verify(dsn: str, *, merchant: str | None = None) -> Findings:
     with _connect(dsn) as conn:
         check_columns_match_signed_form(conn, findings, merchant)
         check_chains(conn, findings, merchant)
+        check_amount_conservation(conn, findings, merchant)
         check_ledger_invariants(conn, findings)
     return findings
 
@@ -213,6 +300,21 @@ def _render(findings: Findings) -> str:
     lines = ["DWAAR CHAIN VERIFICATION", "─" * 68]
     for name, count in sorted(findings.checked.items()):
         lines.append(f"  {name:<34} {count:>8} rows")
+    if findings.legacy:
+        lines.append("")
+        total = sum(findings.legacy.values())
+        lines.append(
+            f"  NOTE {total} record(s) below the migration-0017 watermark do not conserve "
+            "money."
+        )
+        for code, count in sorted(findings.legacy.items()):
+            lines.append(f"       {count:>6}  {code}")
+        lines.append(
+            "       Written before the invariant was enforced. FAILURES.md F-038 and F-043."
+        )
+        lines.append(
+            "       A violation ABOVE the watermark is a failure, not a note."
+        )
     if findings.gaps:
         lines.append("")
         for merchant_id, missing in findings.gaps.items():
@@ -251,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
                     "checked": findings.checked,
                     "failures": findings.failures,
                     "gaps": findings.gaps,
+                    "legacy": findings.legacy,
                 },
                 indent=2,
             )

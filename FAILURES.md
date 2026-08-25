@@ -1324,3 +1324,175 @@ them by id, and a verifier that is expected to fail is a verifier nobody reads.
 **Worth noting about the control:** nothing else caught this. The test passed. The suite was
 green at 926. `make verify` is the only thing in the project that would have noticed, and it
 noticed on the first run after the rows appeared.
+
+### F-043 — `throttle` and `step_up` reserved budget for decisions that permitted nothing — FIXED
+
+**Found:** by the invariant written to fix F-038, on its first run against the database. It
+was not looked for.
+
+Stage 6 ran whenever the policy verdict was not `deny`:
+
+```python
+if policy.verdict != "deny" and not (injection and injection.flagged):
+```
+
+Stage 7 returns `throttle` and `step_up` **before** it ever looks at the ledger. So an agent
+told "come back later" had already been debited, and its retry — a different idempotency key,
+so not absorbed — was debited again. The ledger has no release path for it yet, so the budget
+was consumed permanently by a transaction that never happened.
+
+**1,070 throttled and 23 stepped-up records** in the local database had moved money for a
+decision that authorised none. It had been happening since the baseline policy landed.
+
+**This is F-041's shape as well as F-038's.** A default reached by falling off the end of a
+chain of positive checks is a default nobody chose: `!= "deny"` enumerates what is forbidden
+and lets everything else through, including a verdict that does not exist yet.
+
+**Fix:** a whitelist. `RESERVING_VERDICTS = {"permit", "bound"}`, so a verdict added later
+lands on the strict side. Those records now carry NULL balances, because nothing moved and
+recording a balance would imply the ledger had been consulted.
+
+**Worth noting:** the 1,093 rows are not corrected — they cannot be, the chain is append-only
+and their balances are inside signed payloads. They are counted by `make verify` under the
+migration-0017 watermark, by class, on every run.
+
+---
+
+### F-044 — A demo expectation was rewritten to match an artifact of dirty state — FIXED
+
+**Found:** by clearing the rolling windows and running the demo twice.
+
+`make demo` reported beat 3.1 — the behavioural drift beat — scoring 0.67 and stepping up,
+against a timeline that expected a deny. I rewrote the expectation to `step_up` and wrote a
+paragraph justifying it: a deterministic rule may refuse because the principal wrote it, a
+probabilistic signal should escalate because it has an opinion rather than an instruction.
+
+The reasoning is sound. **The measurement was not.** The observation windows had not been
+cleared between runs, so the agent's history still contained the previous run's burst and the
+drift had become that agent's normal. From a clean window the same pattern scores **1.0** —
+the deny band, and the original expectation.
+
+So the spec had been edited to fit a number produced by leftover state, with a good argument
+attached. That is exactly what `eval/PREDICTIONS.md` exists to prevent, arriving on a number
+nobody thought to register because it was "just the demo".
+
+**Fix:** the expectation is back to `deny`. The rule *name* is still corrected —
+`behavioural_drift` was written before `dwaar/policy/baseline.py` existed and names no rule
+the system has. `tools/demo.py` now clears the demo agents' windows before each run, so two
+consecutive runs produce identical verdicts; that reproducibility is what surfaced this, and
+it is the more useful half of the finding.
+
+**The general form:** a rationalisation is not distinguishable from an explanation by how
+good it sounds. It is distinguishable by whether the measurement it explains was sound, and
+that has to be checked separately.
+
+---
+
+### F-045 — A request without a card scores as an anomaly, because no training request lacked one — OPEN, deferred past the held-out run
+
+**Found:** by `make demo`, when four ordinary beats stepped up or denied from a clean window.
+
+A request with no `instrument_bin` produces `bin_diversity = 0`. Every request in the training
+traffic carried a card, so the fitted isolation forest has never seen that value, and it reads
+a fabricated 0 as an extreme observation:
+
+```
+first request, no card:      risk 0.7054   anomaly 0.7054   -> step_up
+first request, with a card:  risk 0.2999   anomaly 0.1489   -> permit
+```
+
+The two vectors differ in exactly two slots, `bin_diversity` and `distinct_skus_1h`.
+
+**The defect is in the feature layer, not the model.** `to_vector()` fills every slot, so a
+feature that was never *measured* becomes a 0 that reads as a measurement of zero. That is
+precisely the distinction `to_natural()` exists to preserve on the rules side — a missing
+feature there is `None`, not a fabricated 0 — and the model side does the opposite.
+
+The consequence is not confined to the demo. **A payout has no card by nature.** Today it
+scores as an outlier for that reason alone.
+
+**And it is F-030 again.** The zoo's agents all carry a card because that is how the generator
+was written, so no automated check could catch it: the leakage gate looks for a feature that
+IS the label, and this is a feature whose *absence* is unrepresented in the training
+distribution. F-030's conclusion stands unchanged — "no automated check will".
+
+**Deliberately NOT fixed now.** Changing feature computation on 30 August changes what the
+held-out run on the 31st measures, and a fix applied between registering a prediction and
+testing it is a thumb on the scale. Recorded here **before** the run, which is what makes it
+evidence rather than a story told afterwards.
+
+What was corrected is the demo timeline, which was simply wrong: those beats describe a
+shopping agent buying things with a card and were sending neither a SKU nor a card.
+
+**Candidate fixes, for after the run:** an explicit presence indicator per optional feature
+(requires retraining); imputing the training population's median for an unmeasured slot
+(requires the bundle to carry medians); or declining to consult the model when the inputs it
+needs were never observed, which needs no retraining and for which `risk_score = NULL`
+already means the right thing.
+
+---
+
+### F-046 — A NOT VALID CHECK constraint on `decision_records` blocks demo beat 6 — PARTIALLY FIXED
+
+**Found:** by `make demo`'s beat 6 crashing with
+
+```
+psycopg.errors.CheckViolation: new row for relation "decision_records" violates
+check constraint "decision_records_injection_flag_matches_stages"
+```
+
+The tamper is `UPDATE decision_records SET amount_paise = 500000`. A `NOT VALID` constraint
+exempts existing rows from *validation* but still governs every subsequent UPDATE — so
+touching a row written before the constraint existed re-checks it and the UPDATE is refused.
+The row in question predated the injection detector: `injection_flag=false` with no
+`detect_injection` stage, which migration 0014's constraint forbids.
+
+**This erodes a rule migration 0007 states explicitly:**
+
+> a superuser MUST be able to tamper: the control being demonstrated is detection by
+> cryptography, not prevention by DBMS. Preventing the tamper would destroy the only evidence
+> that the detection works.
+
+Every `NOT VALID` CHECK added to this table narrows the set of rows beat 6 can be performed
+on, silently, and the narrowing is only visible when someone picks a row it excludes.
+
+**Fixed in two places, and open in one.** Migration 0017's money invariant was written as a
+CHECK first and rewritten as a `BEFORE INSERT` trigger, which is the correct scope: it is a
+write-path invariant about what the application records, not a tamper control — column
+tampering is already covered by the signature and the integrity registry. `tools/demo.py` now
+tampers a record the run itself just wrote and reports which constraint refused a candidate.
+
+Migration 0014's constraint is left as it is: it is applied, correct, and rewriting an applied
+migration is worse than the narrow hazard it creates.
+
+**The rule for the future:** a constraint on `decision_records` that must only govern what the
+application writes belongs in a `BEFORE INSERT` trigger. `NOT VALID` is right for a constraint
+that should genuinely also govern updates.
+
+---
+
+### F-047 — Ten records whose signed bytes named a tool their column did not — FIXED
+
+**Found:** by `make verify`, going from PASS to `FAIL — 10 problems: decision_records 1:
+columns do not match the signed canonical_json`. The 987-test suite was green.
+
+Migration 0017 added `tool` as a signed field. For a window of a few minutes during the
+change, `dwaar/crypto/record.py` already put it in the canonical payload and
+`decision_records.append_signed` had not yet been given the column. Every MCP call written in
+that window produced a row whose signature covers `"tool":"create_refund"` and whose `tool`
+column is NULL.
+
+**That is F-016 exactly** — a signed blob and the columns beside it disagreeing — introduced
+by the change that was adding a signed field, which is when the risk is highest.
+
+**Fix:** the INSERT was completed within the same session and every subsequent row verifies.
+The ten rows were deleted, whole chains at a time rather than the bad rows alone: removing
+seq 1 and leaving seq 2 would leave a record whose `prev_hash` points at nothing, which reads
+as CHAIN BROKEN — a worse artifact than the one being removed. They were on eight throwaway
+test merchants, nothing references them, and F-042 set the precedent.
+
+**Worth noting about the control — this is the third time.** F-018's third instance, F-042,
+and now this. Each time the suite was green and `make verify` was the only thing that
+noticed. That is why `make verify` moved into CI in this phase rather than remaining
+something someone runs, and why the CI step asserts the row COUNT and not just the verdict:
+a verifier with nothing to verify prints the same PASS as one that checked everything.

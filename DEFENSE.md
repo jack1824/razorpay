@@ -330,6 +330,26 @@ it caught was not the one it was written for.
 That is the whole argument for the shape, and it is why the no-LLM rule is enforced by walking
 an import closure rather than by grepping for a client name.
 
+**A second instance, and this one is the check correcting the architecture rather than the
+code.** The async explainer landed with its publisher in `dwaar/explain/publisher.py`, called
+from `/v1/authorize` after the commit. Reasonable-looking, and the build failed: `dwaar.explain`
+is on the blocklist, so importing it from a request path made an LLM package reachable from the
+hot path.
+
+The tempting fix was to narrow the blocklist to `dwaar.llm` — the publisher has no model in it,
+after all. That would have traded a structural guarantee for a naming convenience: the value of
+listing `dwaar.explain` bluntly is that nobody can add an LLM import to that package later and
+have it quietly become reachable from an API route.
+
+So the boundary moved instead, to the line that was actually there. The gateway publishes a
+fact — *record R exists in chain M at seq N*. A consumer interprets it. Publishing a record
+identifier is a gateway concern with no model in it; explaining is a consumer concern with one.
+`dwaar/outbox.py` is imported by the API and by `dwaar/explain/`; nothing imports
+`dwaar/explain/`.
+
+The check did not find a bug. It found the wrong decomposition, an hour after it was made, and
+the argument for keeping the guard blunt is exactly the argument for having it at all.
+
 ---
 
 ## 7. The policy engine has a closed operator set instead of an expression language

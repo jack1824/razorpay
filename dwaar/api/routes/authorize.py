@@ -22,6 +22,7 @@ from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel, Field
 from starlette import status
 
+from dwaar import outbox
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
 from dwaar.errors import ChainError, LedgerError
@@ -189,6 +190,21 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
         # Stages 6 and 8 shared this transaction. Committing here is what makes "a
         # committed reservation always has a record" true.
         await conn.commit()
+
+    # Announce the record on the outbox. AFTER the commit, best effort, never awaited
+    # for a result the caller depends on. `dwaar/outbox.py` is deliberately NOT in
+    # `dwaar/explain/` — that package is blocklisted from every request path.
+    #
+    # A replayed outcome is deliberately NOT republished: a retried request is one decision
+    # delivered twice, and a second explanation for one record is a row the table's UNIQUE
+    # constraint refuses anyway.
+    if not outcome.replayed:
+        await outbox.publish(
+            getattr(app.state, "redis", None),
+            record_id=outcome.record_id or "",
+            merchant_id=outcome.merchant_id or "",
+            seq=outcome.seq or 0,
+        )
 
     # AFTER the commit, and only on a permitting decision. The order is created for what the
     # LEDGER reserved, never for what the request asked — see dwaar/integrations/razorpay.py.

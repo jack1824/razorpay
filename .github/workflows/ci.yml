@@ -103,9 +103,55 @@ jobs:
           python -m pytest -q -p no:cacheprovider \
             tests/db/test_authorize_pipeline.py -k beat_2
 
-      - name: make verify/eval/demo must exit non-zero until implemented
+      # `make verify` has now caught two defects the test suite missed — F-018's third
+      # instance (a fixture writing a column instead of re-signing the row) and F-042 — both
+      # with the suite green. That makes it load-bearing, and load-bearing things do not
+      # depend on somebody remembering to run them.
+      #
+      # It runs AFTER the suite, over whatever the suite committed, so it verifies real
+      # records rather than an empty table.
+      - name: make verify — the independent verifier, over what the suite just wrote
+        run: make verify
+
+      # A verifier with nothing to verify prints the same PASS as one that checked
+      # everything. That is F-014's exact failure mode, in the one tool whose entire value
+      # is that its report can be believed — so the COUNT is asserted, not just the verdict.
+      - name: Assert the verifier actually checked something
         run: |
-          for t in verify eval demo; do
+          python -m dwaar.verify_cli --json > /tmp/verify.json
+          python - <<'PY'
+          import json, sys
+          report = json.load(open("/tmp/verify.json"))
+          checked = report["checked"]
+          if not report["ok"]:
+              print("verification FAILED:", *report["failures"], sep="\n  ")
+              sys.exit(1)
+          for name in ("decision_records.chain", "decision_records.columns",
+                       "decision_records.amount"):
+              if checked.get(name, 0) < 1:
+                  print(f"{name} checked {checked.get(name, 0)} rows — a PASS over nothing")
+                  sys.exit(1)
+          print("verified:", checked)
+          PY
+
+      - name: make demo — every beat, against the running gateway
+        run: |
+          python -m scripts.seed_db
+          nohup python -m uvicorn dwaar.api.app:app --port 8080 --log-level warning &
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/health >/dev/null && break; sleep 1; done
+          # --no-kill: there are no containers in this job to kill. The beats that CAN be
+          # asserted here are the six that make a decision, and every expectation in the
+          # timeline is checked against what the API returned.
+          make demo DEMO_ARGS="--fast --no-kill"
+          make demo-restore
+
+      # The stub guard, reduced to what is still a stub. All three targets exited 2 until
+      # the thing behind them existed; `make demo` was the last, and there is nothing left
+      # for this loop to protect. Kept as an empty list rather than deleted, so the next
+      # stub added has an obvious home.
+      - name: No target may exit 0 while its implementation is a stub
+        run: |
+          for t in ; do
             if make $t >/dev/null 2>&1; then
               echo "make $t exited 0 but is not implemented — a green stub is a false claim"
               exit 1

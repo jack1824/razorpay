@@ -19,6 +19,7 @@ SUPERUSER="${1:-$(whoami)}"
 DBNAME="${2:-dwaar}"
 OWNER_PW="${DWAAR_OWNER_PASSWORD:-owner_pw}"
 APP_PW="${DWAAR_APP_PASSWORD:-app_pw}"
+EXPLAINER_PW="${DWAAR_EXPLAINER_PASSWORD:-explainer_pw}"
 POSTGRES_PW="${POSTGRES_PASSWORD:-postgres_pw}"
 
 psql -v ON_ERROR_STOP=1 -U "$SUPERUSER" -d postgres <<SQL
@@ -45,6 +46,14 @@ BEGIN
     ELSE
         ALTER ROLE dwaar_app WITH LOGIN PASSWORD '${APP_PW}';
     END IF;
+
+    -- Explainer: SELECT on decision_records, INSERT on explanations, nothing else. Owns
+    -- nothing either. Migration 0018 does the grants; this only creates the login.
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'dwaar_explainer') THEN
+        CREATE ROLE dwaar_explainer LOGIN PASSWORD '${EXPLAINER_PW}';
+    ELSE
+        ALTER ROLE dwaar_explainer WITH LOGIN PASSWORD '${EXPLAINER_PW}';
+    END IF;
 END
 \$\$;
 SQL
@@ -61,11 +70,14 @@ ALTER SCHEMA public OWNER TO dwaar_owner;
 
 GRANT CONNECT ON DATABASE ${DBNAME} TO dwaar_app;
 GRANT USAGE   ON SCHEMA public TO dwaar_app;
+GRANT CONNECT ON DATABASE ${DBNAME} TO dwaar_explainer;
+GRANT USAGE   ON SCHEMA public TO dwaar_explainer;
 
 -- dwaar_app may not create objects. If it could, it would own them, and an owner cannot
 -- be restricted by GRANT.
 REVOKE CREATE ON SCHEMA public FROM dwaar_app;
+REVOKE CREATE ON SCHEMA public FROM dwaar_explainer;
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 SQL
 
-echo "bootstrap complete: ${DBNAME} owned by dwaar_owner; dwaar_app owns nothing"
+echo "bootstrap complete: ${DBNAME} owned by dwaar_owner; dwaar_app and dwaar_explainer own nothing"

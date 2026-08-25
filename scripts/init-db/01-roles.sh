@@ -9,6 +9,8 @@
 # thing that makes GRANT SELECT, INSERT meaningful on decision_records.
 set -euo pipefail
 
+DWAAR_EXPLAINER_PASSWORD="${DWAAR_EXPLAINER_PASSWORD:-explainer_pw}"
+
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-SQL
     -- Owner: owns every table, runs migrations. The API never connects as this.
     CREATE ROLE dwaar_owner LOGIN PASSWORD '${DWAAR_OWNER_PASSWORD}';
@@ -16,16 +18,24 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-S
     -- App: NOT an owner of anything, ever. This is the whole control.
     CREATE ROLE dwaar_app   LOGIN PASSWORD '${DWAAR_APP_PASSWORD}';
 
+    -- Explainer: SELECT on decision_records, INSERT on explanations, nothing else.
+    -- Also owns nothing. See migration 0018 — this role is what makes "the LLM cannot
+    -- affect a decision" a property of the database rather than of the code.
+    CREATE ROLE dwaar_explainer LOGIN PASSWORD '${DWAAR_EXPLAINER_PASSWORD}';
+
     ALTER DATABASE ${POSTGRES_DB} OWNER TO dwaar_owner;
     ALTER SCHEMA public OWNER TO dwaar_owner;
 
     GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO dwaar_app;
     GRANT USAGE   ON SCHEMA public TO dwaar_app;
+    GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO dwaar_explainer;
+    GRANT USAGE   ON SCHEMA public TO dwaar_explainer;
 
     -- dwaar_app may not create objects. If it could, it would own them, and an owner
     -- cannot be restricted by GRANT.
     REVOKE CREATE ON SCHEMA public FROM dwaar_app;
+    REVOKE CREATE ON SCHEMA public FROM dwaar_explainer;
     REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 SQL
 
-echo "roles dwaar_owner and dwaar_app created; ${POSTGRES_DB} owned by dwaar_owner"
+echo "roles dwaar_owner, dwaar_app and dwaar_explainer created; ${POSTGRES_DB} owned by dwaar_owner"

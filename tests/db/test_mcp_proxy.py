@@ -11,22 +11,17 @@ chain, on the mandate's own terms, with no model consulted.**
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime, timedelta
-
 import psycopg
 import pytest
 
 from dwaar.authorize.types import AuthorizeRequest
-from dwaar.crypto import keys as keymod
-from dwaar.crypto import mandate as mandatemod
 from dwaar.crypto.signer import ensure_registered
-from dwaar.db.repositories import agents, decision_records, mandates, principals
+from dwaar.db.repositories import decision_records
 from dwaar.mcp import proxy
 from dwaar.risk import injection as _injection
 from dwaar.risk.observations import InMemoryObservationStore
 from tests._support.fakes import FixedScorer
-from tests.conftest import AGENT_SEED, rand_id
+from tests.conftest import rand_id
 
 pytestmark = pytest.mark.db
 
@@ -36,63 +31,49 @@ DETECTOR = _injection.load()
 async def scoped_mandate_with(
     owner_dsn,
     signer,
+    make_mandate,
     *,
     scopes: list[str] | None = None,
     allow_categories: list[str] | None = None,
     deny_categories: list[str] | None = None,
 ):
-    """Build a GENUINELY SIGNED mandate with scopes.
+    """A genuinely signed mandate with scopes, built by the ONE builder.
 
-    Shared by the fixture and by the category test, so neither is tempted to reach for an
-    UPDATE. There is one way to make a mandate in this file and it goes through the signer.
+    This used to be a second copy of `make_mandate`'s signing logic, kept here because the
+    shared fixture could not express `scopes`. Two builders for one signed artifact is the
+    affordance F-042 walked through: when the shared one cannot do what a test needs, the
+    test writes its own — and the second one drifts, or the next author skips it and reaches
+    for `UPDATE mandates SET scopes = ...` instead.
+
+    So `make_mandate` learned the parameter and this became an adapter: a merchant of its
+    own, a connection of its own, and every signed term still built and signed in exactly
+    one place.
     """
-    scopes = ["collect.create", "read"] if scopes is None else scopes
-    allow_categories = allow_categories or []
-    deny_categories = deny_categories or []
     merchant = rand_id("mch")
-    agent_id, principal_id, mandate_id = (
-        rand_id("agt"), rand_id("prn"), rand_id("mnd")
-    )
-    agent_key = keymod.derive_private_key(AGENT_SEED, "agent", agent_id)
-    principal_key = keymod.derive_private_key(AGENT_SEED, "principal", principal_id)
-    expires = datetime.now(UTC) + timedelta(days=30)
-
     conn = await psycopg.AsyncConnection.connect(owner_dsn)
-    await principals.create(
-        conn, principal_id=principal_id, merchant_id=merchant,
-        public_key=keymod.public_bytes(principal_key),
-    )
-    await agents.create(
-        conn, agent_id=agent_id, display_name="mcp-test",
-        public_key=keymod.public_bytes(agent_key), registered_by=merchant,
-    )
-    payload = mandatemod.build_payload(
-        mandate_id=mandate_id, principal_id=principal_id, agent_id=agent_id,
-        max_total_paise=50_000_000, max_per_txn_paise=10_000_000,
-        allow_categories=allow_categories, deny_categories=deny_categories,
-        substitution_tolerance="none",
-        expires_at=expires, nonce=uuid.uuid4().hex, scopes=scopes,
-    )
-    canonical = mandatemod.canonical_json(payload)
-    await mandates.create(
-        conn, mandate_id=mandate_id, principal_id=principal_id, agent_id=agent_id,
-        max_total_paise=50_000_000, max_per_txn_paise=10_000_000, expires_at=expires,
-        nonce=payload["nonce"], canonical_json=canonical,
-        signature=principal_key.sign(canonical.encode()),
-        mandate_hash=mandatemod.mandate_hash(payload),
-        allow_categories=allow_categories, deny_categories=deny_categories,
-        substitution_tolerance="none", scopes=scopes,
+    mandate = await make_mandate(
+        conn,
+        merchant_id=merchant,
+        max_total_paise=50_000_000,
+        max_per_txn_paise=10_000_000,
+        scopes=["collect.create", "read"] if scopes is None else scopes,
+        allow_categories=allow_categories or [],
+        deny_categories=deny_categories or [],
     )
     await ensure_registered(conn, signer)
     await conn.commit()
     await conn.close()
-    return {"merchant": merchant, "agent_id": agent_id, "mandate_id": mandate_id}
+    return {
+        "merchant": merchant,
+        "agent_id": mandate["agent_id"],
+        "mandate_id": mandate["mandate_id"],
+    }
 
 
 @pytest.fixture
-async def scoped_mandate(owner_dsn, signer):
+async def scoped_mandate(owner_dsn, signer, make_mandate):
     """A mandate delegating collection but NOT outbound money. The demo's shape."""
-    return await scoped_mandate_with(owner_dsn, signer)
+    return await scoped_mandate_with(owner_dsn, signer, make_mandate)
 
 
 def tool_request(fixture, tool: str, **arguments) -> AuthorizeRequest:
@@ -287,7 +268,7 @@ async def test_a_tool_call_with_a_category_is_still_category_checked(
     # the verifier protects, and the shortcut that produces one is always the same shortcut:
     # writing a column instead of re-signing the row.
     mandate = await scoped_mandate_with(
-        owner_dsn, signer,
+        owner_dsn, signer, make_mandate,
         deny_categories=["gift_cards"], allow_categories=["groceries"],
     )
     request = AuthorizeRequest(

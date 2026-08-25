@@ -59,6 +59,56 @@ export interface Integration {
   simulated: boolean;
 }
 
+export interface Verification {
+  ok: boolean;
+  merchant_id: string;
+  checked: Record<string, number>;
+  records: number;
+  failures: string[];
+  /** The seq the verifier named, when it found a break. Demo beat 6 puts this on screen. */
+  broken_at_seq: number | null;
+  /** Reported, never treated as a break — a Postgres outage produces denials that cannot
+   *  be chained, and absence must not read as a tamper. */
+  gaps: number[];
+  /** Records written before an invariant was enforced, counted by violation code. Shown
+   *  rather than hidden: a violation above the migration watermark is a failure. */
+  legacy: Record<string, number>;
+  /** Age of this result. A cached PASS read as a live one is the failure the SIMULATED
+   *  badge exists to prevent, one screen over. */
+  verified_ago_s: number;
+  command: string;
+}
+
+export interface McpCall {
+  seq: number;
+  record_id: string;
+  created_at: string;
+  agent_id: string;
+  tool: string;
+  /** null means the tool is UNLISTED, which is denied — not unknown-and-allowed. */
+  required_scope: string | null;
+  money_direction: string | null;
+  delegated: string[];
+  /** NULL scopes and [] behave identically at the gate and differ in the record. */
+  delegated_is_null: boolean;
+  decision: DecisionKind;
+  reason_code: string;
+  rule_fired: string | null;
+  amount_paise: number | null;
+  amount_display: string | null;
+  risk_score_is_null: boolean;
+}
+
+export interface Explanation {
+  explanation: string | null;
+  /** null means no model was called — a cache hit or the deterministic fallback. Kept
+   *  distinct so the console never implies a sentence came from a model when it did not. */
+  model?: string | null;
+  cached?: boolean;
+  generated_at?: string;
+  reason?: string;
+}
+
 export interface Health {
   status: Severity;
   version: string;
@@ -78,6 +128,10 @@ export interface Health {
       reason: string | null;
       rationale: string;
       checked_at: string;
+      /** The risk model and the injection detector report theirs. */
+      model_version?: string;
+      /** The explainer only: decisions that went on being made while it was dead. */
+      backlog?: number;
     }
   >;
 }

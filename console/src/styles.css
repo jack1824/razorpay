@@ -167,3 +167,68 @@ tbody tr[data-fresh="true"] { background: rgba(46, 160, 67, 0.07); }
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+
+/* ── day 30: chain verifier, MCP enforcement, system health ───────────────────────── */
+
+/* Beat 6's verdict. Deliberately enormous: it is the one moment where the audience should
+   read a single word from across the room and understand it with nothing said. */
+.verifier { max-width: 1100px; }
+.verdict {
+  font-size: 76px; font-weight: 800; letter-spacing: 2px; padding: 34px 0 22px;
+  text-align: center; border-radius: 10px; border: 2px solid;
+}
+.verdict.pass { color: var(--nominal); border-color: rgba(63, 185, 80, 0.35); background: rgba(63, 185, 80, 0.08); }
+.verdict.fail { color: var(--deny);    border-color: rgba(248, 81, 73, 0.45); background: rgba(248, 81, 73, 0.10); font-size: 52px; }
+.verdict-sub { text-align: center; color: var(--text); font-size: 16px; margin-top: 14px; }
+.verdict-sub .muted { color: var(--muted); }
+
+.failures { margin: 22px 0 0; padding-left: 20px; color: var(--deny); font-size: 14px; line-height: 1.7; }
+.verifier-notes { margin-top: 26px; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.verifier-notes b { color: var(--text); }
+.verifier-notes .command code {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 5px;
+  padding: 2px 8px; margin: 0 6px; color: var(--text);
+}
+
+.mcp-legend { color: var(--muted); font-size: 14px; margin-bottom: 16px; line-height: 1.6; }
+.mcp-legend b { color: var(--text); }
+/* Outbound is the whole point of beat 7: the amount is fine, the DIRECTION is not. */
+.outbound { color: var(--deny); font-size: 12px; margin-left: 8px; font-weight: 600; }
+.unmapped { color: var(--deny); font-size: 13px; }
+.token[data-match="true"] { border-color: var(--allow); color: var(--allow); }
+
+.health-banner {
+  display: flex; align-items: center; gap: 12px; font-size: 18px;
+  padding: 14px 18px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel); margin-bottom: 20px;
+}
+.health-banner.degraded { border-color: rgba(210, 153, 34, 0.45); }
+.health-banner.critical { border-color: rgba(248, 81, 73, 0.5); }
+.health-banner .muted { color: var(--muted); font-size: 15px; }
+
+.components { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+.component { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.component[data-down="true"][data-severity="critical"] { border-color: rgba(248, 81, 73, 0.5); }
+.component[data-down="true"][data-severity="degraded"] { border-color: rgba(210, 153, 34, 0.45); }
+.component-head { display: flex; align-items: center; gap: 9px; font-size: 15px; }
+.component-head .fail-mode { margin-left: auto; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; }
+.component-status { margin: 8px 0 6px; font-size: 14px; }
+.component-status .backlog { color: var(--bound); }
+.rationale { color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.rationale.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin-top: 6px; }
+
+.integrations { margin-top: 24px; }
+.integrations h4 { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin: 0 0 10px; }
+.integration { display: flex; align-items: center; gap: 12px; font-size: 15px; padding: 7px 0; }
+.integration .mode { color: var(--muted); }
+
+.tab-alert {
+  background: var(--deny); color: #0d1117; font-size: 10px; font-weight: 800;
+  border-radius: 4px; padding: 2px 5px; margin-left: 8px; letter-spacing: 0.5px;
+}
+
+/* The explainer's text in the detail panel. Absence is a normal state, not an error: the
+   explainer is asynchronous and may be behind, or dead — which is demo beat 5. */
+.explanation { font-size: 15px; line-height: 1.65; }
+.explanation .provenance { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+.explanation.absent { color: var(--muted); font-style: italic; }

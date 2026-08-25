@@ -30,10 +30,11 @@ where "this agent may not act" belongs.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from psycopg import AsyncConnection
 
+from dwaar import clock
 from dwaar.authorize.types import AuthorizeRequest, SignatureResult
 from dwaar.config import Settings
 from dwaar.crypto import http_sig
@@ -77,7 +78,7 @@ async def verify_signature(
     # credential.
     acceptable: list[bytes] = [bytes(agent["public_key"])]
     rotated_at = agent["key_rotated_at"]
-    reference = now or datetime.now(UTC)
+    reference = now or clock.now()
     if (
         agent["previous_public_key"] is not None
         and rotated_at is not None

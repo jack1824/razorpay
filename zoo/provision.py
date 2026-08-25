@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
 
+from dwaar import clock
 from dwaar.crypto import keys as keymod
 from dwaar.crypto import mandate as mandatemod
 from dwaar.db.repositories import agents as agents_repo
@@ -85,7 +86,7 @@ async def provision(
     exist.
     """
     provisioned: list[Provisioned] = []
-    expires_at = datetime.now(UTC) + timedelta(days=30)
+    expires_at = clock.now() + timedelta(days=30)
 
     async with await psycopg.AsyncConnection.connect(dsn) as conn:
         for index, (archetype, suffix, bursty) in enumerate(plan):

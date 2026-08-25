@@ -39,6 +39,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from starlette import status
 
+from dwaar import outbox
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
 from dwaar.errors import ChainError, LedgerError
@@ -131,6 +132,21 @@ async def call_tool(body: ToolCallBody, request: Request):
             return _error("unavailable", status.HTTP_503_SERVICE_UNAVAILABLE)
 
         await conn.commit()
+
+    # Announce the record on the outbox. AFTER the commit, best effort, never awaited
+    # for a result the caller depends on. `dwaar/outbox.py` is deliberately NOT in
+    # `dwaar/explain/` — that package is blocklisted from every request path.
+    #
+    # A replayed outcome is deliberately NOT republished: a retried request is one decision
+    # delivered twice, and a second explanation for one record is a row the table's UNIQUE
+    # constraint refuses anyway.
+    if not outcome.replayed:
+        await outbox.publish(
+            getattr(app.state, "redis", None),
+            record_id=outcome.record_id or "",
+            merchant_id=outcome.merchant_id or "",
+            seq=outcome.seq or 0,
+        )
 
     log.info(
         "mcp_call",

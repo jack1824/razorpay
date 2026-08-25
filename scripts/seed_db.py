@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 import psycopg
 
+from dwaar import clock
 from dwaar.authorize import pipeline
 from dwaar.authorize.types import AuthorizeRequest
 from dwaar.config import get_settings
@@ -107,7 +107,7 @@ async def drive(dsn: str, rounds: int = 1) -> None:
                 private = keymod.derive_private_key(SEED, "agent", request.agent_id)
                 headers = http_sig.sign_request(
                     private, method="POST", path="/v1/authorize", body=body,
-                    keyid=request.agent_id, created=int(time.time()), nonce=uuid.uuid4().hex,
+                    keyid=request.agent_id, created=clock.unix(), nonce=uuid.uuid4().hex,
                 )
                 try:
                     outcome = await pipeline.authorize(
