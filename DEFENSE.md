@@ -303,6 +303,33 @@ determined author can still work around — someone could open a socket. What th
 that doing so is a deliberate act which fails the build, rather than a convenience someone
 reaches for at 2am while debugging.
 
+**Why structural rather than targeted, with a concrete instance.** The general argument for a
+structural check is that it covers cases nobody enumerated. That is easy to assert and hard to
+demonstrate, so here is an actual occurrence, an hour apart, in this repository.
+
+The latency gate had been reporting a p99 for a pipeline with two stages short-circuited: the
+test called `authorize` without an observation store and without a scorer, so Redis was never
+touched and no inference ever ran. Reported 2.80ms. The real figure is 5.66ms.
+
+The fix was deliberately not "pass the collaborators". It was to assert the **preconditions
+the label presumes** — no stubs in the registry, no degradation on the measured request, and
+every stage reporting a non-zero duration, because a stage costing 0.000ms is either not
+running or not being timed.
+
+An hour later that assertion failed for a reason nobody had considered. A thousand identical
+requests fired in a tight loop — same amount, same card, same SKU, hundreds per second — has
+zero amount entropy, zero cadence entropy and zero inter-arrival variance, which is exactly
+the card-tester signature. The risk model denied them. A denial short-circuits the ledger, so
+the benchmark had silently gone back to measuring a cheaper pipeline, by a completely
+different route from the one that had just been fixed.
+
+A targeted check — "assert a scorer was passed" — would have been green throughout. The
+structural one caught a defect it was not written for, on its first run, and the first defect
+it caught was not the one it was written for.
+
+That is the whole argument for the shape, and it is why the no-LLM rule is enforced by walking
+an import closure rather than by grepping for a client name.
+
 ---
 
 ## 7. The policy engine has a closed operator set instead of an expression language
