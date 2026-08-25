@@ -26,7 +26,7 @@ from dwaar.db.repositories.base import (
 
 _COLUMNS = (
     "mandate_id, principal_id, agent_id, max_total_paise, max_per_txn_paise, "
-    "allow_categories, deny_categories, substitution_tolerance, expires_at, nonce, "
+    "allow_categories, deny_categories, substitution_tolerance, scopes, expires_at, nonce, "
     "canonical_json, signature, mandate_hash, created_at, revoked_at"
 )
 
@@ -54,6 +54,7 @@ async def create(
     allow_categories: list[str] | None = None,
     deny_categories: list[str] | None = None,
     substitution_tolerance: str = "none",
+    scopes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Insert the mandate and its genesis ledger entry atomically.
 
@@ -64,9 +65,9 @@ async def create(
         conn,
         f"INSERT INTO mandates ("
         f"  mandate_id, principal_id, agent_id, max_total_paise, max_per_txn_paise, "
-        f"  allow_categories, deny_categories, substitution_tolerance, expires_at, "
+        f"  allow_categories, deny_categories, substitution_tolerance, scopes, expires_at, "
         f"  nonce, canonical_json, signature, mandate_hash"
-        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING {_COLUMNS}",
+        f") VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING {_COLUMNS}",
         (
             mandate_id,
             principal_id,
@@ -76,6 +77,10 @@ async def create(
             allow_categories or [],
             deny_categories or [],
             substitution_tolerance,
+            # Sorted here as well as in `build_payload`, so the column and the signed bytes
+            # cannot differ by ordering — which the integrity check would report as a
+            # tampered mandate.
+            sorted(scopes) if scopes is not None else None,
             expires_at,
             nonce,
             canonical_json,

@@ -98,7 +98,11 @@ def render_decision(
             rule_fired="injection.detected",
         )
 
-    # Ledger. Unavailable and exceeded are different answers.
+    # Ledger. Unavailable, exceeded, and NOT NEEDED are three different answers.
+    #
+    # The third was missing until a read-only MCP tool went through: `fetch_payment` moves
+    # no money, so nothing is reserved, and `reserved=False` was read as "the budget refused
+    # it". A delegated, free, permitted call was denied for insufficient funds.
     if ledger is None or not ledger.ok:
         return Decision(
             decision="deny",
@@ -106,7 +110,7 @@ def render_decision(
             internal_reason=(ledger.internal_reason if ledger else "ledger_not_reached"),
             rule_fired="ledger.unavailable",
         )
-    if not ledger.reserved:
+    if not ledger.reserved and not ledger.not_required:
         return Decision(
             decision="deny",
             reason_code=REASON_DENIED,

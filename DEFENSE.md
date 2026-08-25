@@ -500,3 +500,80 @@ reading a table and asking why one number was large. There is no reason to belie
 process is exhaustive, and every number in this project that describes the *model* should be
 read with that in mind. The numbers that describe the *system* — the ones in the table above —
 do not depend on it, which is why they are the ones offered without qualification.
+
+---
+
+## 9. Enforcement sits at the proxy, not inside the agent
+
+**The decision.** Spending limits, delegated scopes and budgets are enforced by a service the
+agent calls through. Nothing is enforced by the agent itself, and the agent is given no
+opportunity to enforce anything.
+
+**What was rejected.** An SDK. A decorator. A `max_spend` parameter on the agent framework —
+which is what most of this problem's existing answers look like, and which is the obvious
+first design because it needs no new infrastructure and no network hop.
+
+**Why it does not work.** An agent that enforces its own spending limit is *the thing under
+constraint applying the constraint*. That is not a security boundary; it is a convention, and
+it holds exactly as long as the agent behaves.
+
+Three ways it stops holding, none of them exotic:
+
+- **The agent is wrong.** A model that plans a purchase can plan around a limit it can see.
+  It does not need to be adversarial to do this — it needs to be optimising, which is what it
+  is for.
+- **The agent is updated.** A framework upgrade, a prompt change, a new tool. The limit was a
+  line in code that someone else now maintains.
+- **The agent is compromised.** Prompt injection is the whole reason this project has a
+  threat model. An agent argued into ignoring its own budget has ignored nothing external —
+  the budget was never external.
+
+The general form is older than agents and is why authorization lives at the resource rather
+than at the caller: **a control the controlled party can decline to apply is not a control.**
+It is worth stating in those terms because a decorator genuinely does prevent the *accidental*
+overspend, and that is the case people have in mind when they reach for it. It is also the
+easy case.
+
+**Where the boundary actually is.** The mandate is signed by the principal, stored in a
+database the agent cannot write, evaluated by a service the agent cannot modify, and enforced
+by ledger arithmetic in a transaction the agent cannot join. Every one of those is a property
+of where the code runs, not of how it is written.
+
+### The cost, and it is a real one
+
+**A proxy is a hop.** Latency, an operational dependency, and something that has to be up
+when money moves. The pipeline is 6.16ms at p99, which is small against a payment, but it is
+not zero and it is a component that can fail. The fail matrix exists because of exactly this.
+
+**And the honest one: an agent holding the raw merchant token bypasses the proxy entirely.**
+
+Nothing in this design prevents that. There is no cryptography that could — the token is a
+bearer credential, and a bearer credential works for whoever bears it, wherever they present
+it. If a merchant hands an agent the token and the agent calls `api.razorpay.com` directly,
+every control described in this document is simply not in the path.
+
+That is not a gap to be patched. It is the reason the abstraction belongs **in the platform
+rather than in front of it**: the credential has to be scoped at the moment it is issued, so
+that the agent never holds one capable of more than its mandate. A third-party enforcement
+layer can demonstrate the primitive and cannot make anyone route through it.
+
+Said plainly, because it is the strongest version of the argument and also the most
+self-effacing: **the right place for this is inside a payments platform, and a bolt-on that
+the enforced party can decline to use is a convention wearing a control's clothes.** What
+this project can show is what the primitive should look like, that it can be enforced
+deterministically, that it costs single-digit milliseconds, and that every decision it makes
+is provable afterwards.
+
+### What this is not a claim about
+
+Razorpay's Remote MCP Server authenticates with a merchant token, exposes 35+ tools, and
+offers `--read-only` and `--toolsets` as scoping controls. All of that is documented and all
+of it works as documented.
+
+**None of it is a vulnerability, and we do not say it is.** A token doing what a token does is
+not a flaw. The observation is that per-principal delegation with monetary bounds is a
+primitive that does not exist yet — a missing abstraction rather than a defect.
+
+The distinction is not diplomacy. "Your product has a security hole" is a claim that would
+have to be defended and would lose. "Your product is missing a primitive, here is one, here
+is what it costs and here is where it should live" is a claim this repository supports.

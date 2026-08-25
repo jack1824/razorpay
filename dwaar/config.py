@@ -68,6 +68,28 @@ class Settings(BaseSettings):
         default=Path("models/injection"), alias="DWAAR_INJECTION_DIR"
     )
 
+    # ── Razorpay ────────────────────────────────────────────────────────────────────
+    #
+    # `stub` by default. The keys come from the environment and may not be present, and a
+    # default of `live_test` would mean the service refuses to start on a machine without
+    # them — which is every machine except one.
+    #
+    # `live_test` with no key is an ERROR, not a downgrade. See dwaar/integrations/razorpay.py:
+    # a demo that quietly falls back to stub reports simulated results while everyone in the
+    # room believes the API was called.
+    razorpay_mode: str = Field(default="stub", alias="RAZORPAY_MODE")
+    razorpay_key_id: str | None = Field(default=None, alias="RAZORPAY_KEY_ID")
+    razorpay_key_secret: str | None = Field(default=None, alias="RAZORPAY_KEY_SECRET")
+    razorpay_webhook_secret: str | None = Field(
+        default=None, alias="RAZORPAY_WEBHOOK_SECRET"
+    )
+
+    # ── MCP upstream ────────────────────────────────────────────────────────────────
+    mcp_upstream_mode: str = Field(default="stub", alias="MCP_UPSTREAM_MODE")
+    mcp_upstream_url: str = Field(
+        default="https://mcp.razorpay.com/mcp", alias="MCP_UPSTREAM_URL"
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

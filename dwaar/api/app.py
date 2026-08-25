@@ -28,10 +28,12 @@ from redis.asyncio import Redis
 
 from dwaar import __version__
 from dwaar.api.middleware import BodySizeLimitMiddleware, TraceIDMiddleware
-from dwaar.api.routes import authorize, console, health
+from dwaar.api.routes import authorize, console, health, mcp, webhooks
 from dwaar.config import Settings, get_settings
 from dwaar.crypto.signer import derive_signer, ensure_registered
+from dwaar.integrations.razorpay import RazorpayClient
 from dwaar.logging import configure_logging, get_logger
+from dwaar.mcp import scopes as mcp_scopes
 from dwaar.nonce import RedisNonceStore
 from dwaar.policy.store import PolicyStore
 from dwaar.risk import injection as injectionmod
@@ -115,6 +117,26 @@ async def lifespan(app: FastAPI):
         directory=str(settings.model_dir),
     )
 
+    # The MCP scope map. Loaded and VALIDATED at startup so a malformed map is a boot
+    # failure rather than a surprise on the first tool call — and so the file read is not
+    # on the request path.
+    app.state.scope_map = mcp_scopes.load()
+    log.info("mcp_scope_map", count=len(app.state.scope_map))
+
+    # Razorpay. `stub` unless the environment says otherwise; `live_test` with no key is an
+    # ERROR and not a silent downgrade, so a misconfigured demo fails loudly at boot rather
+    # than reporting simulated results as real.
+    app.state.razorpay = RazorpayClient(
+        mode=settings.razorpay_mode,
+        key_id=settings.razorpay_key_id,
+        key_secret=settings.razorpay_key_secret,
+    )
+    log.info(
+        "razorpay",
+        mode=settings.razorpay_mode,
+        simulated=app.state.razorpay.simulated,
+    )
+
     log.info("startup", version=__version__, component="api")
     try:
         yield
@@ -158,6 +180,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(health.router, tags=["ops"])
     app.include_router(authorize.router, tags=["authorize"])
+    app.include_router(mcp.router, tags=["mcp"])
+    app.include_router(webhooks.router, tags=["webhooks"])
     app.include_router(console.router)
     return app
 

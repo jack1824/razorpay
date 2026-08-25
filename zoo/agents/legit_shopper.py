@@ -53,6 +53,15 @@ from zoo.catalogue import by_category
 #: anywhere in this package, so the velocity a model trains on is the velocity it serves.
 MEAN_GAP_SECONDS = 4.0
 
+#: Peak-to-trough swing in activity, 0.5 giving a 3x range across the day. Deliberately
+#: modest: at 0.9 the swing is 19x, which put the evening peak at 29 requests a minute —
+#: within a rounding error of the degraded-mode throttle threshold, so a perfectly ordinary
+#: shopper would have been slowed down for being awake at the wrong time.
+#:
+#: A distribution parameter that pushes a legitimate archetype into an enforcement threshold
+#: is a generator artifact, not a behaviour.
+DIURNAL_AMPLITUDE = 0.5
+
 #: Beta(2, 18): mean 0.10. A tenth of card attempts failing is unremarkable.
 DECLINE_ALPHA, DECLINE_BETA = 2.0, 18.0
 
@@ -72,9 +81,22 @@ class LegitShopper(Agent):
     name = "legit_shopper"
     request_multiplier = 1.0
 
-    def __init__(self, *args: Any, bursty: bool = False, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        bursty: bool = False,
+        hour: int | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.bursty = bursty
+
+        # The diurnal cycle needs a clock, and a generator that reads one is a generator
+        # whose output is not reproducible from a seed. `hour` pins it, and every test that
+        # asserts anything about cadence passes one — otherwise the suite would agree with
+        # a bug during working hours and disagree with it at 4am, which is how the
+        # inversion above survived.
+        self._hour = hour
         self.grouped = by_category(self.catalogue)
         self._burst_item = None
 
@@ -107,6 +129,10 @@ class LegitShopper(Agent):
         # The extra cards reached for when the first one keeps failing. This is what lifts
         # `bin_diversity` into card-tester territory during a burst.
         self._retry_bins = [self.rng.choice(TEST_BINS) for _ in range(2)]
+
+    def hour(self) -> int:
+        """Local hour, or the pinned one. The only clock read in this file."""
+        return time.localtime().tm_hour if self._hour is None else self._hour
 
     def _session_length(self) -> int:
         """Negative binomial, as a Gamma-Poisson mixture."""
@@ -178,9 +204,18 @@ class LegitShopper(Agent):
 
         # Diurnal: quiet in the small hours, busy in the evening. Applied to legitimate
         # traffic only — adversaries ignoring the clock is a real signal, not a planted one.
-        hour = time.localtime().tm_hour
-        diurnal = 1.0 + 0.9 * math.cos((hour - 20) / 24 * 2 * math.pi)
-        return self.rng.expovariate(1.0 / (MEAN_GAP_SECONDS * max(0.25, diurnal)))
+        #
+        # The multiplier is an ACTIVITY level and divides the gap. The first version
+        # multiplied it, which inverted the whole curve: peak activity produced the LONGEST
+        # gaps, so the shopper was quietest at 8pm and ran at 60 requests a minute at 8am —
+        # twice the degraded-mode throttle threshold and well into card-tester territory,
+        # while the comment above it said the opposite.
+        #
+        # It survived because the tests that would have caught it read the wall clock too,
+        # so they agreed with the bug during working hours and disagreed with it at 4am.
+        # A time-dependent test does not fail; it waits.
+        activity = 1.0 + DIURNAL_AMPLITUDE * math.cos((self.hour() - 20) / 24 * 2 * math.pi)
+        return self.rng.expovariate(activity / MEAN_GAP_SECONDS)
 
     def payment_would_succeed(self) -> bool:
         # The burst exists BECAUSE the card is failing. A retry storm with a normal decline

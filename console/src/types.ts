@@ -54,9 +54,21 @@ export interface Agent {
 
 export type Severity = "nominal" | "degraded" | "critical";
 
+export interface Integration {
+  mode: string;
+  simulated: boolean;
+}
+
 export interface Health {
   status: Severity;
   version: string;
+  /**
+   * Reported separately from `components` because integrations are not in the fail matrix.
+   * `simulated` drives the SIMULATED badge, and it comes from the SERVER rather than from
+   * a build-time constant — a badge a developer has to remember to set is a badge that is
+   * wrong exactly when it matters.
+   */
+  integrations?: Record<string, Integration>;
   components: Record<
     string,
     {

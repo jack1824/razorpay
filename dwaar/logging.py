@@ -60,6 +60,9 @@ ALLOWED_FIELDS: frozenset[str] = frozenset(
         # operational
         "migration", "version", "applied", "component", "role", "count", "attempt",
         "table", "duration_s", "ok", "error_type", "loaded", "directory",
+        # Integration surfaces. `mode` and `simulated` are the two that must never be wrong
+        # in a log: they are how anyone reading it afterwards knows whether a call was real.
+        "mode", "simulated", "event_type", "duplicate", "tool", "order_id",
     }
 )
 

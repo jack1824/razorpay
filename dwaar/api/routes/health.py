@@ -127,11 +127,31 @@ async def health(request: Request) -> dict:
 
     status = overall([Severity(component["severity"]) for component in components.values()])
 
+    # Integrations are reported SEPARATELY from components, because they are not in the
+    # fail matrix and giving them a severity would imply one. What matters here is a single
+    # bit: is the thing we are about to show anyone real, or simulated?
+    #
+    # The console renders its SIMULATED badge from this. It is a demo safety net rather
+    # than a nicety — the failure it prevents is standing in front of judges describing a
+    # stub as a live integration, which is the one mistake that cannot be walked back.
+    razorpay_client = getattr(app.state, "razorpay", None)
+    integrations = {
+        "razorpay": {
+            "mode": getattr(razorpay_client, "mode", "unconfigured"),
+            "simulated": bool(getattr(razorpay_client, "simulated", True)),
+        },
+        "mcp_upstream": {
+            "mode": getattr(app.state.settings, "mcp_upstream_mode", "stub"),
+            "simulated": getattr(app.state.settings, "mcp_upstream_mode", "stub") != "live",
+        },
+    }
+
     return {
         "status": status.value,
         "version": __version__,
         "trace_id": getattr(request.state, "trace_id", None),
         "components": components,
+        "integrations": integrations,
     }
 
 

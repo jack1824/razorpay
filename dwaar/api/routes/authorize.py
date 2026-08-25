@@ -63,6 +63,31 @@ class AuthorizeBody(BaseModel):
     instrument_bin: Annotated[str | None, Field(default=None, pattern=r"^[0-9]{6}$")]
     cart_id: Annotated[str | None, Field(default=None, max_length=64)]
 
+    # Create a Razorpay order for the RESERVED amount when the decision permits.
+    #
+    # Opt-in rather than automatic, for two reasons. It is an outbound HTTP call in
+    # `live_test` mode and does not belong in every authorize by default; and collection is
+    # a separate concern from authorisation, so making it implicit would blur the line this
+    # whole service exists to draw.
+    collect: bool = False
+
+
+class OrderResponse(BaseModel):
+    """The created order. `simulated` comes from the RESPONSE BODY, not from configuration.
+
+    The console renders its SIMULATED badge from this field, so the badge cannot be stale:
+    there is no separate flag anyone has to remember to flip. The failure that prevents is
+    standing in front of judges describing a stub as a live integration.
+    """
+
+    order_id: str
+    amount_paise: int
+    currency: str
+    status: str
+    simulated: bool
+    was_clamped: bool = False
+    requested_paise: int | None = None
+
 
 class DecisionResponse(BaseModel):
     decision: Literal["allow", "bound", "throttle", "step_up", "deny"]
@@ -73,6 +98,7 @@ class DecisionResponse(BaseModel):
     bounded_amount_paise: int | None = None
     budget_remaining_paise: int | None = None
     retry_after_ms: int | None = None
+    order: OrderResponse | None = None
 
 
 @router.post(
@@ -164,6 +190,41 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
         # committed reservation always has a record" true.
         await conn.commit()
 
+    # AFTER the commit, and only on a permitting decision. The order is created for what the
+    # LEDGER reserved, never for what the request asked — see dwaar/integrations/razorpay.py.
+    # Outside the transaction because a payment provider being slow must not be able to hold
+    # a database transaction open, and outside the pipeline because it is not a decision.
+    order = None
+    if body.collect and outcome.decision.decision in ("allow", "bound") and outcome.reservation:
+        try:
+            created = await app.state.razorpay.create_order(
+                outcome.reservation,
+                receipt=(outcome.record_id or "")[:40],
+                requested_paise=body.amount_paise,
+                notes={"decision_id": outcome.record_id or "", "agent_id": body.agent_id},
+            )
+            order = OrderResponse(
+                order_id=created.order_id,
+                amount_paise=created.amount_paise,
+                currency=created.currency,
+                status=created.status,
+                simulated=created.simulated,
+                was_clamped=created.was_clamped,
+                requested_paise=created.requested_paise,
+            )
+            log.info(
+                "order_created",
+                decision_id=outcome.record_id,
+                order_id=created.order_id,
+                simulated=created.simulated,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The reservation is committed and the decision is chained. Reporting the
+            # failure and returning the decision is correct: the authorisation genuinely
+            # happened, and pretending it did not because a downstream call failed would
+            # lose the record of it.
+            log.error("order_failed", error_type=type(exc).__name__)
+
     return DecisionResponse(
         decision=outcome.decision.decision,
         decision_id=outcome.record_id or "",
@@ -173,4 +234,5 @@ async def authorize(body: AuthorizeBody, request: Request, response: Response):
         bounded_amount_paise=outcome.decision.bounded_amount_paise,
         budget_remaining_paise=outcome.budget_remaining_paise,
         retry_after_ms=outcome.decision.retry_after_ms,
+        order=order,
     )

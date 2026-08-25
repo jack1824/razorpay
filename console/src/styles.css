@@ -145,3 +145,25 @@ tbody tr[data-fresh="true"] { background: rgba(46, 160, 67, 0.07); }
   padding: 2px 9px; font-size: 13px; color: var(--muted);
 }
 .empty { color: var(--muted); padding: 40px 0; text-align: center; font-size: 16px; }
+
+
+/*
+ * SIMULATED badge. Deliberately the loudest thing in the header — louder than the health
+ * dot, because a degraded component is a fact about the system and a stubbed integration is
+ * a fact about what the audience is being shown.
+ */
+.simulated-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.55rem;
+  margin-right: 0.75rem;
+  border: 1px solid #d08a1e;
+  border-radius: 3px;
+  background: rgba(208, 138, 30, 0.14);
+  color: #f0b95c;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}

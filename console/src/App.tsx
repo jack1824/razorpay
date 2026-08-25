@@ -22,6 +22,12 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const seen = useRef<Set<number>>(new Set());
 
+  // Which integrations are stubbed, from the server. Recomputed on every health poll, so
+  // switching RAZORPAY_MODE and restarting the API changes the badge without a rebuild.
+  const simulated = Object.entries(health?.integrations ?? {})
+    .filter(([, integration]) => integration.simulated)
+    .map(([name]) => name);
+
   // Roster and health poll. The roster is what drives the budget bars, and it must keep
   // up with the stream — a bar that lags the decision that drained it breaks the one
   // visual the audience reads without explanation.
@@ -89,6 +95,19 @@ export function App() {
       <header>
         <h1>DWAAR</h1>
         <span className="tag">authorization for agents that spend money</span>
+        {simulated.length > 0 && (
+          /*
+           * The demo safety net. Visible whenever ANY integration is running against a stub,
+           * naming which ones, driven by /health rather than by a build flag.
+           *
+           * The failure this exists to prevent is standing in front of judges describing a
+           * stub as a live integration. That is not a bug anyone can walk back afterwards,
+           * so the badge is loud, it is at the top, and nobody has to remember to turn it on.
+           */
+          <span className="simulated-badge" title={`Stubbed: ${simulated.join(", ")}`}>
+            SIMULATED · {simulated.join(" · ")}
+          </span>
+        )}
         {health && (
           <span className="health">
             <span className={`dot ${health.status}`} />

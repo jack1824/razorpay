@@ -41,6 +41,15 @@ class AuthorizeRequest:
     instrument_bin: str | None = None
     cart_id: str | None = None
 
+    # MCP tool calls. Set only when the request arrived through `dwaar/mcp/`.
+    #
+    # Deliberately on the SAME request type rather than a parallel one: an MCP denial and an
+    # HTTP denial are the same kind of authority decision and belong in the same chain,
+    # evaluated by the same gate. A second request type would have meant a second place to
+    # get authority wrong.
+    tool: str | None = None
+    tool_arguments: Mapping[str, Any] = field(default_factory=dict)
+
 
 @dataclass(frozen=True)
 class StageResult:
@@ -143,6 +152,25 @@ class LedgerResult(StageResult):
     budget_before: Paise | None = None
     budget_after: Paise | None = None
     rule_fired: str | None = None
+
+    not_required: bool = False
+    """The action moves no money, so there was nothing to reserve.
+
+    Distinct from `reserved=False`, which means a reservation WAS attempted and refused. A
+    read-only MCP tool — `fetch_payment` — is delegated, permitted and free; collapsing the
+    two would deny it for insufficient budget, which is both wrong and confusing to read in
+    a record.
+
+    `budget_before` and `budget_after` stay NULL in this case, because nothing moved and
+    recording a balance would imply the ledger was consulted."""
+
+    reservation: Any | None = None
+    """The `ReserveResult` itself, carried through so a collection can be bounded by the
+    ledger's own arithmetic rather than by a number copied out of it.
+
+    `balance_before - balance_after` IS the reserved amount, and it cannot disagree with the
+    ledger because it is the ledger. An `amount_paise` field here would be a second copy,
+    and a second copy is a place for the request's figure to reappear."""
 
 
 @dataclass(frozen=True)

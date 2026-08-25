@@ -29,10 +29,68 @@ IDENTITY = AgentIdentity(
 )
 
 
+#: Every cadence assertion pins the hour. The legitimate shopper has a diurnal cycle, so a
+#: test that reads the wall clock passes in the evening and fails at 4am — and one that did
+#: exactly that is why the cycle stayed INVERTED for a day: the test agreed with the bug
+#: during working hours.
+#:
+#: 20:00 is the evening peak, which is the shopper at its fastest and therefore the hardest
+#: case for "a card tester is much faster than a shopper".
+PINNED_HOUR = 20
+
+#: A gap at or below this counts as "burst cadence".
+#:
+#: Derived from the burst's own parameter rather than picked: the burst draws
+#: `BURST_GAP_SECONDS + Exponential(mean BURST_GAP_SECONDS)`, so its mean is 0.5s with a tail
+#: well past 0.75. A threshold at 3x the card tester's mean cut that tail and broke the run
+#: into fragments, which made a real burst look like scattered fast requests.
+#:
+#: Measured across twelve seeds at the diurnal peak: bursty agents produce runs of 14-31
+#: consecutive gaps under this threshold; calm agents produce 2-4. The separation is what
+#: the assertions below rely on.
+BURST_CADENCE_SECONDS = 1.5
+
+
+def longest_run_slice(
+    gaps: list[float], threshold: float = BURST_CADENCE_SECONDS
+) -> tuple[int, int]:
+    """Index range of the longest contiguous stretch at burst cadence, as `[start, end)`.
+
+    The RANGE rather than the count, because the amount assertion needs the requests that
+    were actually part of the burst. Selecting them by a per-gap threshold pulled in the
+    occasional fast request from outside it, and one ordinary amount among twenty clustered
+    ones is enough to triple the spread.
+    """
+    best = (0, 0)
+    start = 0
+    for index, gap in enumerate([*gaps, float("inf")]):
+        if gap > threshold:
+            if index - start > best[1] - best[0]:
+                best = (start, index)
+            start = index + 1
+    return best
+
+
+def longest_run(gaps: list[float], threshold: float = BURST_CADENCE_SECONDS) -> int:
+    """The longest CONTIGUOUS stretch at burst cadence.
+
+    A count would measure noise: at the diurnal peak an exponential shopper hits card-tester
+    cadence a dozen times in sixty requests purely by chance. What no exponential produces is
+    twenty of them in a row.
+    """
+    best = current = 0
+    for gap in gaps:
+        current = current + 1 if gap <= threshold else 0
+        best = max(best, current)
+    return best
+
+
 def build(archetype: str, seed: int = 7, requests: int = 30, **kwargs):
     cls = ARCHETYPES[archetype]
     if archetype == "budget_breacher":
         kwargs.setdefault("max_per_txn_paise", 2_000_000)
+    if archetype == "legit_shopper":
+        kwargs.setdefault("hour", PINNED_HOUR)
     return cls(
         IDENTITY,
         base_url="http://127.0.0.1:8080",
@@ -122,6 +180,44 @@ def test_card_tester_arrives_roughly_twenty_times_faster_than_a_shopper():
     tester_gaps = [tester.next_gap() for _ in range(400)]
     ratio = (sum(shopper_gaps) / len(shopper_gaps)) / (sum(tester_gaps) / len(tester_gaps))
     assert 5 < ratio < 60, f"arrival-rate ratio is {ratio:.1f}, expected roughly 20x"
+
+
+def test_a_shopper_never_runs_fast_enough_to_be_throttled_as_degraded():
+    """At its diurnal PEAK, an ordinary shopper must stay clear of the degraded-mode
+    velocity threshold.
+
+    Otherwise a perfectly legitimate agent is slowed down for being awake at the wrong time
+    whenever the risk model is unavailable — an enforcement threshold tripped by a
+    distribution parameter rather than by behaviour. The first diurnal amplitude put the
+    evening peak at 29 requests a minute against a threshold of 30.
+    """
+    from dwaar.policy.baseline import DEGRADED_VELOCITY_PER_MINUTE
+
+    for hour in range(24):
+        agent = build("legit_shopper", seed=5, hour=hour)
+        gaps = [agent.next_gap() for _ in range(2_000)]
+        rate = 60 / (sum(gaps) / len(gaps))
+        assert rate < DEGRADED_VELOCITY_PER_MINUTE * 0.8, (
+            f"at hour {hour} a shopper averages {rate:.1f} requests/minute against a "
+            f"degraded throttle threshold of {DEGRADED_VELOCITY_PER_MINUTE}"
+        )
+
+
+def test_the_diurnal_cycle_is_busy_in_the_evening_and_quiet_in_the_morning():
+    """The direction, asserted, because it was backwards.
+
+    The multiplier is an activity level and DIVIDES the gap. Multiplying it inverted the
+    whole curve — the shopper was quietest at 8pm and ran at 60 requests a minute at 8am,
+    while the comment beside it claimed the opposite.
+    """
+    def rate_at(hour: int) -> float:
+        agent = build("legit_shopper", seed=11, hour=hour)
+        gaps = [agent.next_gap() for _ in range(2_000)]
+        return 60 / (sum(gaps) / len(gaps))
+
+    assert rate_at(20) > rate_at(8) * 2, (
+        "the evening is not busier than the morning; the diurnal cycle is inverted"
+    )
 
 
 def test_card_tester_has_far_higher_bin_diversity():
@@ -239,8 +335,6 @@ def test_a_bursty_shopper_lands_in_card_tester_feature_space():
         one item at one price                      -> amount entropy collapses
         a high decline rate during it              -> failure ratio
     """
-    from zoo.agents.card_tester import MEAN_GAP_SECONDS as TESTER_GAP
-
     calm = build("legit_shopper", seed=21, bursty=False, requests=60)
     wild = build("legit_shopper", seed=21, bursty=True, requests=60)
 
@@ -257,14 +351,15 @@ def test_a_bursty_shopper_lands_in_card_tester_feature_space():
     calm_gaps, calm_cards, _, calm_declines = trace(calm)
     wild_gaps, wild_cards, wild_amounts, wild_declines = trace(wild)
 
-    fast = [gap for gap in wild_gaps if gap <= TESTER_GAP * 3]
-    calm_fast = [gap for gap in calm_gaps if gap <= TESTER_GAP * 3]
-
-    assert len(fast) >= 15, (
-        f"only {len(fast)} requests at card-tester cadence; a burst this short does not "
+    wild_run, calm_run = longest_run(wild_gaps), longest_run(calm_gaps)
+    assert wild_run >= 15, (
+        f"longest run at card-tester cadence is {wild_run}; a burst this short does not "
         "lift a one-minute velocity into the region the model reacts to"
     )
-    assert len(fast) > len(calm_fast) * 3
+    assert wild_run > calm_run * 3, (
+        f"burst run {wild_run} against a calm run of {calm_run} — not a burst, just a "
+        "faster-than-usual stretch"
+    )
 
     assert len(set(wild_cards)) > len(set(calm_cards)), (
         "the retry storm must reach for another card, or bin_diversity does not move"
@@ -277,8 +372,9 @@ def test_a_bursty_shopper_lands_in_card_tester_feature_space():
     # The burst is ONE purchase retried, so its amounts cluster tightly — which is what
     # collapses `amount_entropy` into the region a card tester occupies. Compared against
     # the same agent's non-burst amounts rather than against an absolute number.
-    burst = [a for a, g in zip(wild_amounts, wild_gaps, strict=True) if g <= TESTER_GAP * 3]
-    other = [a for a, g in zip(wild_amounts, wild_gaps, strict=True) if g > TESTER_GAP * 3]
+    start, end = longest_run_slice(wild_gaps)
+    burst = wild_amounts[start:end]
+    other = wild_amounts[:start] + wild_amounts[end:]
 
     def spread(values):
         mean = sum(values) / len(values)
@@ -293,15 +389,13 @@ def test_a_bursty_shopper_lands_in_card_tester_feature_space():
 def test_a_bursty_agent_always_bursts_within_a_short_run():
     """Seeded index, not a per-request coin flip. "The overlap did not happen this time" is
     indistinguishable from "there is no overlap"."""
-    from zoo.agents.card_tester import MEAN_GAP_SECONDS as TESTER_GAP
-
     for seed in range(1, 12):
         agent = build("legit_shopper", seed=seed, bursty=True, requests=40)
         gaps = []
         for _ in range(40):
             agent.next_request()
             gaps.append(agent.next_gap())
-        assert sum(1 for gap in gaps if gap <= TESTER_GAP * 3) >= 15, (
+        assert longest_run(gaps) >= 12, (
             f"seed {seed} produced no burst inside a 40-request run"
         )
 

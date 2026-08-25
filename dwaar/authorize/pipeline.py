@@ -147,6 +147,14 @@ class PipelineOutcome:
     replayed: bool = False
     """True when this outcome was read back from an existing record, not decided afresh."""
 
+    reservation: Any | None = None
+    """The `ReserveResult` from stage 6, carried out so a collection can be bounded by what
+    the LEDGER reserved rather than by what the request asked for.
+
+    The whole point of passing the reservation rather than an amount: there is then no
+    parameter through which the request's figure could get back in. See
+    `dwaar/integrations/razorpay.py`."""
+
 
 def _replayed(row, timer: _Timer, started: float) -> PipelineOutcome:
     """Rebuild the outcome from a stored record.
@@ -348,10 +356,31 @@ async def authorize(
 
             # ── 6. budget. Only if 1-5 permit. ──────────────────────────────────────
             if policy.verdict != "deny" and not (injection and injection.flagged):
-                ledger = await timer.run(
-                    ledger_stage.STAGE_NAME,
-                    ledger_stage.reserve_budget(request, mandate.mandate, conn=conn),
+                # Reserve what the policy AUTHORISED, not what the agent asked for.
+                #
+                # A `bound` verdict has reduced the request. Reserving the original figure
+                # would debit the mandate for money that was never authorised to move, and
+                # any collection created from that reservation would charge the larger
+                # number — the decision saying one thing and the money doing another.
+                effective = (
+                    policy.bounded_amount_paise
+                    if policy.verdict == "bound" and policy.bounded_amount_paise
+                    else request.amount_paise
                 )
+                if effective <= 0:
+                    # A read-only MCP tool. It is delegated, it is permitted, and it moves
+                    # no money — so there is nothing to reserve, and the ledger is not
+                    # consulted at all. `not_required` is what keeps that distinct from a
+                    # reservation that was attempted and refused.
+                    ledger = ledger_stage.nothing_to_reserve()
+                    timer.timings[ledger_stage.STAGE_NAME] = 0
+                else:
+                    ledger = await timer.run(
+                        ledger_stage.STAGE_NAME,
+                        ledger_stage.reserve_budget(
+                            request, mandate.mandate, conn=conn, amount_paise=effective
+                        ),
+                    )
                 executed.append(ledger_stage.STAGE_NAME)
                 if ledger.degraded:
                     degraded.append(ledger.degraded)
@@ -424,6 +453,7 @@ async def authorize(
         stage_timings_us=timer.timings,
         degraded_mode=sorted(degraded),
         stages_executed=executed,
+        reservation=ledger.reservation if ledger else None,
     )
 
     log.info(

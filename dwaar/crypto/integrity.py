@@ -120,6 +120,11 @@ def _rebuild_mandate(row: Mapping[str, Any]) -> str:
             substitution_tolerance=row["substitution_tolerance"],
             expires_at=row["expires_at"],  # build_payload normalises to UTC
             nonce=row["nonce"],
+            # NULL for mandates signed before migration 0015, and `build_payload` then omits
+            # the key entirely — which is what makes those signatures keep verifying. The
+            # verifier and the signer read the same column, so they cannot disagree about
+            # which canonical form applies. See dwaar/crypto/mandate.py.
+            scopes=list(row["scopes"]) if row.get("scopes") is not None else None,
         )
     )
 

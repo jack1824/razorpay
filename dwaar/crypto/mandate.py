@@ -1,4 +1,4 @@
-"""The signed mandate payload: exactly ten keys, always.
+"""The signed mandate payload: exactly ten keys, plus one that is present or absent.
 
 ADR 0001 item 9. Under JCS an absent key and an empty array serialise differently, so
 "omit if default" would give one mandate two valid ``mandate_hash`` values — and a
@@ -11,6 +11,28 @@ mandate schema in the strategy package marks only seven of the ten as required; 
 is the reason that does not matter.
 
 Pinned by a golden vector in ``tests/crypto/test_mandate_vector.py``.
+
+── The one exception, and why it does not undo the rule ────────────────────────────────
+
+``scopes`` (migration 0015) is included **if and only if the column is not NULL**. That is
+omit-if-absent, which the paragraph above forbids — so it needs its own justification rather
+than an exemption.
+
+The hazard the rule protects against is a signer and a verifier reasoning DIFFERENTLY about
+a default. "Omit `allow_categories` when empty" is dangerous because emptiness is a property
+of the value, and two implementations can disagree about whether `None`, `[]` and a missing
+key are the same thing.
+
+Nullness of a column is not that. Both the signer and the verifier read the same row and see
+the same NULL, so there is no case in which they can disagree about which form applies. The
+discriminator is in the data, not in anybody's interpretation of a default.
+
+The alternative was making it a required eleventh field, which would have invalidated every
+mandate signed before it existed. Those signatures are correct and the terms they cover have
+not changed; breaking them to add a column would be rewriting history to fit a feature.
+
+``tests/crypto/test_mandate_vector.py`` pins BOTH forms with golden vectors, because a
+second canonical form that nothing pins is a second canonical form that will drift.
 """
 
 from __future__ import annotations
@@ -42,6 +64,11 @@ DEFAULTS: dict[str, Any] = {
     "substitution_tolerance": "none",
 }
 
+#: Present in the payload IFF supplied and not None. See the module docstring — this is the
+#: single exception to "materialise every default", and it exists so that mandates signed
+#: before scopes existed keep verifying.
+OPTIONAL_FIELDS: tuple[str, ...] = ("scopes",)
+
 
 def build_payload(**fields: Any) -> dict[str, Any]:
     """Assemble the exact object that gets signed.
@@ -66,7 +93,15 @@ def build_payload(**fields: Any) -> dict[str, Any]:
         else:
             raise ValueError(f"mandate payload missing required field {name!r}")
 
-    extra = set(fields) - set(SIGNED_FIELDS)
+    for name in OPTIONAL_FIELDS:
+        value = fields.get(name)
+        if value is not None:
+            # Sorted, because a set of delegated scopes has no meaningful order and two
+            # callers listing them differently must produce the same mandate. JCS sorts
+            # object KEYS, never array elements, so this has to happen here.
+            payload[name] = sorted(value) if isinstance(value, (list, tuple, set)) else value
+
+    extra = set(fields) - set(SIGNED_FIELDS) - set(OPTIONAL_FIELDS)
     if extra:
         raise ValueError(
             f"mandate payload has fields outside the signed set: {sorted(extra)}. "

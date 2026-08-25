@@ -1162,3 +1162,165 @@ band has no colon.
 
 Held-out result after both changes: 10/10 zoo payloads caught, 0/51 benign strings flagged,
 SKU9001 at confidence 0.19 against a 0.60 threshold.
+
+---
+
+## 2026-08-29 — Phase 8: Razorpay, the MCP proxy, and four found by writing the tests
+
+---
+
+### F-038 — A `bound` decision reserved the FULL requested amount — FIXED
+
+**Found:** by a test asserting that an order created from a reservation carries the bounded
+amount. It carried 180,000 paise against a bound of 50,000.
+
+Stage 6 reserves before stage 7 decides, and it reserved `request.amount_paise` regardless of
+what the policy engine had returned. So a `bound` verdict told the agent *"you may spend
+₹500"* while debiting **₹1,800** from the mandate's budget.
+
+**Why it matters, and it is worse than it first sounds.** The principal's remaining balance
+falls by money that was never authorised to move — silently, because every visible surface is
+consistent: the decision says `bound`, the response says 50,000, the record's `amount_paise`
+says what was asked. Only `budget_before - budget_after` disagrees, and nothing was comparing
+them. Any collection created from that reservation would have charged the larger figure.
+
+It has been latent since `bound` landed in Phase 5. No test caught it because no test asked
+the reservation what it thought the amount was — the assertions were all about the *decision*,
+and the decision was correct.
+
+**Fix:** the pipeline computes the effective amount from the policy verdict and passes it to
+stage 6, which refuses outright to reserve more than the request. `create_order` takes a
+`ReserveResult` and has no `amount_paise` parameter at all, so there is no argument through
+which the request's figure can reach the money.
+
+**The shape worth keeping:** this is the same class as F-016 — two representations of one
+quantity that could diverge with nothing comparing them. There the signed blob and the
+columns; here the decision and the reservation. The fix is the same shape too: make one of
+them derived from the other rather than copied.
+
+---
+
+### F-039 — A delegated read-only tool crashed the pipeline — FIXED
+
+**Found:** the first time an MCP `fetch_payment` went through.
+`ValueError: reserve amount must be positive, got 0`.
+
+A read-only tool is delegated, permitted and moves no money, so its amount is zero. Stage 6
+called `reserve()` with zero, which raises — correctly, because a zero reservation is
+meaningless.
+
+**And the fix exposed a second thing.** Skipping the ledger left `ledger = None`, which
+`render_decision` reads as "the ledger is unavailable" and denies with `unavailable`. Setting
+`reserved=False` instead reads as "the budget refused it" and denies for insufficient funds.
+Both are wrong, and neither is a small mislabelling: a delegated, free, permitted call would
+have been denied, and the record would have said the merchant had run out of money.
+
+**What was missing was a THIRD state.** Unavailable, exceeded, and *not needed* are three
+different answers, and the type could express two.
+
+**Fix:** `LedgerResult.not_required`. The record then carries NULL for `budget_before` and
+`budget_after` rather than a balance, because nothing moved and recording one would imply the
+ledger was consulted.
+
+---
+
+### F-040 — The diurnal cycle was inverted, and the test that would have caught it was time-dependent — FIXED
+
+**Found:** two zoo tests failed at 03:45. They had passed at 20:00 the same day.
+
+The legitimate shopper's arrival rate carries a daily cycle. The multiplier was applied to
+the GAP:
+
+```python
+diurnal = 1.0 + 0.9 * cos((hour - 20) / 24 * 2π)
+gap = expovariate(1.0 / (MEAN_GAP * diurnal))
+```
+
+A larger multiplier means a **longer** gap means **less** activity. So the "peak at 20:00"
+produced the quietest traffic of the day, and 08:00 — the intended trough — produced
+**60 requests a minute**, twice the degraded-mode throttle threshold and well into
+card-tester territory. The comment beside it said "quiet in the small hours, busy in the
+evening" and the code did the opposite.
+
+**Why it survived a full day of testing:** the tests read the wall clock too. They and the
+bug agreed during working hours and disagreed at 4am. **A time-dependent test does not fail;
+it waits.**
+
+**Fix, in three parts, because one would not have been enough:**
+
+- the multiplier is an *activity* level and DIVIDES the gap
+- the amplitude drops from 0.9 to 0.5. At 0.9 the peak was 29 requests a minute against a
+  degraded throttle threshold of 30 — a distribution parameter that puts a legitimate
+  archetype inside an enforcement threshold is a generator artifact, not a behaviour
+- the hour is **injected**, and every cadence test pins it. A generator that reads a clock is
+  a generator whose output is not reproducible from a seed, which contradicts the zoo's own
+  reproducibility claim
+
+A test now asserts the direction outright — evening busier than morning — and another asserts
+that at no hour does an ordinary shopper come within 20% of the throttle threshold.
+
+---
+
+### F-041 — `action_for` defaulted to the LEAST restrictive action — FIXED
+
+**Found:** by a test written from the docstring, which claimed the opposite of the code.
+
+```python
+if rule.moves_money_outward:
+    return "payout"
+return "purchase"          # <- everything else, including unrecognised directions
+```
+
+`moves_money_outward` tests `money_direction == "outbound"`. A tool whose direction is
+anything else — a value nobody anticipated, a typo in the scope map — fell through to
+`purchase`, the most permissive reading, while the comment two lines above said "the most
+restrictive reading, because guessing optimistically about the direction money moves is the
+wrong way to be wrong."
+
+**Fix:** whitelist the directions known not to move money outward and let everything else land
+on `payout`.
+
+**The general shape, which is why this is recorded rather than quietly corrected:** a default
+reached by falling off the end of a chain of positive checks is a default nobody chose. The
+author picks the cases they thought of; the fall-through gets whatever is written last. If
+the safe answer is the fall-through, enumerate the unsafe cases — and if the strict answer is
+the fall-through, enumerate the safe ones.
+
+---
+
+### F-042 — A test wrote a mandate column the signature did not cover — FIXED
+
+**Found:** by `make verify`, which went from PASS to
+`FAIL — 5 problems: mandates mnd_...: columns do not match the signed canonical_json`.
+
+A new test needed a mandate with scopes and took the shortcut: build one with the existing
+fixture, then
+
+```sql
+UPDATE mandates SET scopes = ARRAY['collect.create','read'] WHERE mandate_id = ...
+```
+
+as the owner role. The column said one thing and the principal's signature covered another.
+
+**That is precisely the tamper the integrity check exists to catch** — F-013's scenario,
+performed by our own test suite, five rows of it sitting in the database before anyone
+looked.
+
+**This is F-018 for the third time.** Phase 4: fixtures wrote `canonical_json='{"test":true}'`
+and the verifier rejected them. Phase 6: fixtures claimed `injection_flag=false` on records
+that ran no detection. Now this. The shortcut is always the same shortcut — **writing a
+column instead of re-signing the row** — because writing a column is one line and re-signing
+is fifteen.
+
+The pattern is stable enough to state as a rule: **a fixture that reaches for `UPDATE` on a
+table with a canonical form is a fixture the verifier will reject.** If a test needs a row to
+say something, it has to make a row that legitimately says it.
+
+**Fix:** one builder in the test module that signs for real, used by both call sites, so
+there is no shorter path available. The five tampered rows were deleted — they are unsigned-
+for artifacts created by a test that has since been fixed, nothing in the chain references
+them by id, and a verifier that is expected to fail is a verifier nobody reads.
+
+**Worth noting about the control:** nothing else caught this. The test passed. The suite was
+green at 926. `make verify` is the only thing in the project that would have noticed, and it
+noticed on the first run after the rows appeared.

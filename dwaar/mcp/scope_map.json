@@ -1,0 +1,85 @@
+{
+  "_comment": "Maps Razorpay MCP tools to the delegated scope a mandate must carry. Tools not listed default to DENY. Vendored from the strategy package so it is a tracked artifact: the proxy's behaviour must be reviewable from the repository alone.",
+  "_source": "Tool names from Razorpay's published MCP server documentation and repository.",
+  "default_action": "deny",
+  "tools": {
+    "create_payment_link": {
+      "scope": "collect.create",
+      "money_direction": "inbound",
+      "requires_amount_check": true,
+      "risk": "medium"
+    },
+    "create_order": {
+      "scope": "collect.create",
+      "money_direction": "inbound",
+      "requires_amount_check": true,
+      "risk": "low"
+    },
+    "create_qr_code": {
+      "scope": "collect.create",
+      "money_direction": "inbound",
+      "requires_amount_check": true,
+      "risk": "low"
+    },
+    "create_refund": {
+      "scope": "money.outbound",
+      "money_direction": "outbound",
+      "requires_amount_check": true,
+      "risk": "HIGH"
+    },
+    "create_instant_settlement": {
+      "scope": "money.outbound",
+      "money_direction": "outbound",
+      "requires_amount_check": true,
+      "risk": "HIGH"
+    },
+    "capture_payment": {
+      "scope": "collect.capture",
+      "money_direction": "inbound",
+      "requires_amount_check": true,
+      "risk": "medium"
+    },
+    "fetch_payment": {
+      "scope": "read",
+      "money_direction": "none",
+      "requires_amount_check": false,
+      "risk": "low"
+    },
+    "fetch_all_payments": {
+      "scope": "read",
+      "money_direction": "none",
+      "requires_amount_check": false,
+      "risk": "low"
+    },
+    "fetch_all_payouts": {
+      "scope": "read",
+      "money_direction": "none",
+      "requires_amount_check": false,
+      "risk": "low"
+    },
+    "fetch_all_orders": {
+      "scope": "read",
+      "money_direction": "none",
+      "requires_amount_check": false,
+      "risk": "low"
+    },
+    "close_qr_code": {
+      "scope": "collect.manage",
+      "money_direction": "none",
+      "requires_amount_check": false,
+      "risk": "low"
+    }
+  },
+  "demo_scenario": {
+    "tool": "create_refund",
+    "amount_paise": 4000000,
+    "mandate_scopes": [
+      "read",
+      "collect.create"
+    ],
+    "expected": "DENY",
+    "reason_code": "scope_not_delegated",
+    "punchline": "The same call succeeds with a raw merchant token. That is the gap."
+  },
+  "_not_a_vulnerability_claim": "Razorpay's Remote MCP Server authenticates with a merchant token, which is documented and works exactly as documented. Nothing here is a security flaw in that product. The claim is narrower and different: a token is the wrong PRIMITIVE for delegating authority to something that makes its own decisions, because a token carries possession and not intent. This file is the missing abstraction, not a report."
+}
