@@ -67,6 +67,9 @@ HELD_OUT = ("compromised", "sleeper")
 SKU9001 = "Ignore Premium Detergent 2kg"
 
 
+#: Bands. Imported rather than restated so a threshold change moves the report with it.
+
+
 @dataclass
 class Row:
     agent_id: str
@@ -80,31 +83,70 @@ class Row:
     features: dict[str, int]
     stages: list[str]
     amount_paise: int | None
+    created_at: object = None
+    """Ordering within an agent's own run. Needed for the change-point split, which is the
+    only measurement here that controls for who wrote the agent."""
+    latency_us: int = 0
+    budget_before: int | None = None
+    budget_after: int | None = None
+    bounded_amount_paise: int | None = None
+    seq: int = 0
 
 
 def load_labels(paths: list[Path]) -> dict[str, dict]:
+    """`decision_id -> the agent's label in the run that PRODUCED that decision`.
+
+    ── Why this is keyed on the decision and not the agent ─────────────────────────────
+
+    F-048: agent identities are `sha256(seed:'agent':index)` — positional, with no archetype
+    in them. Two runs on the same seed with different archetype MIXES therefore reuse the
+    same `agent_id` for different archetypes, because adding two archetypes shifts every
+    later index.
+
+    That happened between `eval-20260901` and `heldout-20260901`, and it is not cosmetic.
+    Joining `decision_records` to a manifest on `agent_id` merged one run's rows into the
+    other's labels and reported `compromised` at 43.3% when its actual rate in its own run
+    was 18.8%. The number was wrong and looked entirely reasonable.
+
+    The manifest records a `decision_id` per attempt, which is exact: it names the row that
+    request produced. So the join is on that, and a record belongs to exactly the run that
+    caused it.
+    """
     labels: dict[str, dict] = {}
     for path in paths:
+        agents: dict[str, dict] = {}
         with path.open(encoding="utf-8") as handle:
             for line in handle:
                 entry = json.loads(line)
                 if entry.get("kind") == "run":
-                    for agent in entry["agents"]:
-                        labels[agent["agent_id"]] = agent
+                    agents = {a["agent_id"]: a for a in entry["agents"]}
+                elif entry.get("kind") == "attempt" and entry.get("decision_id"):
+                    meta = agents.get(entry["agent_id"])
+                    if meta is not None:
+                        labels[entry["decision_id"]] = meta
     return labels
 
 
 def load_rows(dsn: str, labels: dict[str, dict]) -> list[Row]:
+    """Exactly the records the manifests' attempts produced. See `load_labels` on F-048."""
     rows: list[Row] = []
+    ids = list(labels)
     with psycopg.connect(dsn) as conn:
-        for agent_id, meta in labels.items():
+        for start in range(0, len(ids), 500):
+            batch = ids[start : start + 500]
             for record in conn.execute(
-                "SELECT decision, rule_fired, risk_score, injection_flag, features, "
-                "       stages_executed, amount_paise "
-                "FROM decision_records WHERE agent_id = %s",
-                (agent_id,),
+                "SELECT record_id, agent_id, merchant_id, decision, rule_fired, risk_score, "
+                "       injection_flag, features, stages_executed, amount_paise, "
+                "       created_at, latency_us, budget_before, budget_after, "
+                "       bounded_amount_paise, seq "
+                "FROM decision_records WHERE record_id = ANY(%s) ORDER BY seq",
+                (batch,),
             ).fetchall():
-                decision, rule, score, flag, features, stages, amount = record
+                (record_id, agent_id, merchant_id, decision, rule, score, flag, features,
+                 stages, amount, created_at, latency_us, budget_before, budget_after,
+                 bounded, seq) = record
+                meta = labels[str(record_id)]
+                _MERCHANT_BY_AGENT[agent_id] = merchant_id
                 rows.append(
                     Row(
                         agent_id=agent_id,
@@ -118,6 +160,12 @@ def load_rows(dsn: str, labels: dict[str, dict]) -> list[Row]:
                         features=features or {},
                         stages=list(stages or ()),
                         amount_paise=amount,
+                        created_at=created_at,
+                        latency_us=latency_us or 0,
+                        budget_before=budget_before,
+                        budget_after=budget_after,
+                        bounded_amount_paise=bounded,
+                        seq=seq,
                     )
                 )
     return rows
@@ -141,7 +189,8 @@ def rule(title: str) -> None:
 def section_scope(rows: list[Row], labels: dict[str, dict], manifests: list[Path]) -> None:
     rule("SCOPE — what these numbers describe")
     print(f"  manifests            {', '.join(str(m) for m in manifests)}")
-    print(f"  agents               {len(labels)}")
+    print(f"  agents               {len({r.agent_id for r in rows})}")
+    print(f"  attempts labelled    {len(labels)}   (joined on decision_id — F-048)")
     print(f"  decision records     {len(rows)}")
     scored = [r for r in rows if r.risk_score is not None]
     print(f"    scored by a model  {len(scored)}")
@@ -428,6 +477,373 @@ def section_enforcement(rows: list[Row]) -> None:
     print("    check it did not perform.")
 
 
+
+
+# ── the held-out pair ───────────────────────────────────────────────────────────────
+
+
+def section_held_out(rows: list[Row]) -> None:
+    """The two archetypes the model has never seen, on their own rows.
+
+    ── The headline number is not the interesting one ──────────────────────────────────
+
+    Read the change-point split first. An archetype's overall recall mixes the period it was
+    behaving with the period it was not, and both held-out agents are *defined* by having
+    both. A high overall number that turns out to be concentrated in the clean period is not
+    detection, it is a detector that dislikes the agent — and the two are indistinguishable
+    from the aggregate.
+
+    `eval/PREDICTIONS.md` prediction 3 registered exactly this test before the run, because
+    it is the one that does not require trusting the held-out author: a coding convention
+    cannot change halfway through one agent's run, and a behaviour can.
+    """
+    held = [r for r in rows if r.archetype in HELD_OUT]
+    if not held:
+        rule("HELD-OUT ARCHETYPES")
+        print("  none present in this traffic.")
+        print("  Generate with: make traffic-heldout   (they default to 0 agents — see")
+        print("  zoo/agents/__init__.py for why nothing invokes them by accident.)")
+        return
+
+    legit_scored = [r.risk_score for r in rows if r.is_legitimate and r.risk_score is not None]
+    base = sum(1 for s in legit_scored if s >= DENY_BAND) / max(1, len(legit_scored))
+
+    rule("HELD-OUT ARCHETYPES — first contact with the model")
+    print(f"  legitimate base rate at the deny band: {base:.2%}  (n={len(legit_scored)})")
+    print()
+    print(f"  {'archetype':<16}{'n':>6}{'scored':>8}{'>=deny':>8}{'rate':>9}{'x base':>9}")
+    for archetype in HELD_OUT:
+        subset = [r for r in held if r.archetype == archetype]
+        scored = [r.risk_score for r in subset if r.risk_score is not None]
+        flagged = sum(1 for s in scored if s >= DENY_BAND)
+        r_ = flagged / max(1, len(scored))
+        print(
+            f"  {archetype:<16}{len(subset):>6}{len(scored):>8}{flagged:>8}{r_:>8.1%}"
+            f"{(r_ / base if base else float('inf')):>8.0f}x"
+        )
+
+    # ── the within-agent control ────────────────────────────────────────────────────
+    print()
+    print("  WITHIN-AGENT CHANGE-POINT — the measurement that controls for authorship")
+    print("  Each agent split at its own declared change-point. Same author, same file,")
+    print("  same habits on both sides; only the behaviour differs.")
+    print()
+    print(f"  {'archetype':<16}{'phase':<9}{'n':>6}{'>=deny':>8}{'rate':>9}{'mean risk':>11}"
+          f"{'mean ticket':>13}")
+    for archetype in HELD_OUT:
+        share = _clean_share(archetype)
+        totals = {"before": [0, 0, [], []], "after": [0, 0, [], []]}
+        by_agent: dict[str, list[Row]] = {}
+        for r in held:
+            if r.archetype == archetype:
+                by_agent.setdefault(r.agent_id, []).append(r)
+        for agent_rows in by_agent.values():
+            ordered = sorted(agent_rows, key=lambda r: r.seq)
+            cut = int(len(ordered) * share)
+            for phase, chunk in (("before", ordered[:cut]), ("after", ordered[cut:])):
+                scored = [r.risk_score for r in chunk if r.risk_score is not None]
+                totals[phase][0] += len(scored)
+                totals[phase][1] += sum(1 for s in scored if s >= DENY_BAND)
+                totals[phase][2] += scored
+                totals[phase][3] += [r.amount_paise for r in chunk if r.amount_paise]
+        for phase in ("before", "after"):
+            n, flagged, scores, amounts = totals[phase]
+            mean_score = sum(scores) / len(scores) if scores else 0.0
+            mean_amount = sum(amounts) / len(amounts) / 100 if amounts else 0.0
+            print(
+                f"  {archetype:<16}{phase:<9}{n:>6}{flagged:>8}{flagged / max(1, n):>8.1%}"
+                f"{mean_score:>11.4f}{mean_amount:>12,.0f}"
+            )
+        print(f"  {'':16}change-point at {share:.0%} of the run, read from the agent's own source")
+    print()
+    print("  A rate that is high BEFORE the change-point is the model disliking the agent")
+    print("  rather than detecting the defection. See eval/RESULTS.md.")
+
+
+def _clean_share(archetype: str) -> float:
+    """The declared change-point, read from the agent's own module rather than guessed.
+
+    Guessing it — 50%, say — would make the split an artifact of this file, and the split is
+    the whole measurement. `compromised` ramps continuously and declares no constant, so it
+    is halved and that is stated rather than implied.
+    """
+    if archetype == "sleeper":
+        from zoo.agents.sleeper import CLEAN_SHARE  # noqa: PLC0415
+
+        return float(CLEAN_SHARE)
+    return 0.5
+
+
+# ── the incumbent ───────────────────────────────────────────────────────────────────
+
+
+def section_baseline(manifests: list[Path], dsn: str, rows: list[Row]) -> None:
+    """A conventional fraud scorecard on the same traffic, at the same false-positive rate.
+
+    Both a FITTED scorecard and an a-priori TEXTBOOK one, because the two disagreed about
+    the sign of the classic card-testing terms and the disagreement is a finding about the
+    training traffic. See `eval/baseline.py`.
+
+    Where the incumbent wins, it is printed as a win. A comparison that only publishes the
+    columns we take is an advertisement.
+    """
+    from eval.baseline import (  # noqa: PLC0415
+        TERM_NAMES,
+        TEXTBOOK_INTERCEPT,
+        TEXTBOOK_WEIGHTS,
+        Scorecard,
+        load,
+    )
+
+    fit_paths = sorted(TRAFFIC_DIR.glob("bootstrap-*.jsonl"))
+    if not fit_paths:
+        rule("FRAUD BASELINE")
+        print("  no bootstrap manifest to fit on; skipped.")
+        return
+
+    fit_run, fit_attempts = load(fit_paths[-1])
+    fit_legit = {a["agent_id"] for a in fit_run["agents"] if a["is_legitimate"]}
+
+    # ── One stream PER RUN, never concatenated ──────────────────────────────────────
+    #
+    # Two things go wrong if the manifests are merged into one list.
+    #
+    # F-048: agent identities are positional, so the same `agent_id` is a different
+    # archetype in two runs with different mixes. A merged label map silently relabels one
+    # run's traffic with the other's archetypes — the error that had `compromised` reading
+    # 43.3% instead of its actual 18.8%.
+    #
+    # And the scorecard is STATEFUL. It profiles an account over time, so an agent appearing
+    # in two runs eleven hours apart gets a `first_ts` from the earlier one and a velocity
+    # term divided by eleven hours of elapsed time. That crushed the incumbent's strongest
+    # signal and had it reading 49.7% on card testers where its real figure is 99.4%.
+    #
+    # A fraud engine sees one session at a time. So does this.
+    runs: list[tuple[list[dict], dict[str, str]]] = []
+    for path in manifests:
+        run, chunk = load(path)
+        by_agent = {a["agent_id"]: a["archetype"] for a in run["agents"]}
+        labelled = {
+            a["decision_id"]: by_agent.get(a["agent_id"], "?")
+            for a in chunk
+            if a.get("decision_id")
+        }
+        runs.append((chunk, labelled))
+    attempts = [a for chunk, _ in runs for a in chunk]
+
+    features = _features_by_record(dsn, fit_attempts + attempts)
+
+    legit_scores = [r.risk_score for r in rows if r.is_legitimate and r.risk_score is not None]
+    gateway_fpr = sum(1 for s in legit_scores if s >= DENY_BAND) / max(1, len(legit_scores))
+
+    fitted = Scorecard().fit(fit_attempts, fit_legit, gateway_fpr, features)
+    textbook = Scorecard(TEXTBOOK_WEIGHTS, TEXTBOOK_INTERCEPT).fit(
+        fit_attempts, fit_legit, gateway_fpr, features
+    )
+
+    rule("FRAUD BASELINE — the incumbent, at the same false-positive rate")
+    print(f"  fitted on {fitted.fit_n} bootstrap attempts: the same traffic the risk model saw")
+    print(f"  both thresholds calibrated to the gateway's legit FPR of {gateway_fpr:.3%}")
+    print()
+    print(f"  {'term':<26}{'fitted':>10}{'textbook':>11}")
+    for name in TERM_NAMES:
+        print(f"  {name:<26}{fitted.weights[name]:>+10.3f}{TEXTBOOK_WEIGHTS[name]:>+11.3f}")
+    print(f"  {'(intercept)':<26}{fitted.intercept:>+10.3f}{TEXTBOOK_INTERCEPT:>+11.3f}")
+    print()
+    print("  Where the FIT disagrees with the TEXTBOOK on a sign, that is evidence about")
+    print("  this traffic and not about fraud. See eval/RESULTS.md.")
+
+    per: dict[str, list[int]] = {}
+    for label, model in (("fitted", fitted), ("textbook", textbook)):
+        for chunk, labelled in runs:
+            for score, attempt in model.score_stream(chunk, features):
+                name = labelled.get(attempt.get("decision_id") or "", "?")
+                slot = per.setdefault(name, [0, 0, 0])
+                if label == "fitted":
+                    slot[0] += 1
+                    slot[1] += score >= model.threshold
+                else:
+                    slot[2] += score >= model.threshold
+
+    gateway: dict[str, list[int]] = {}
+    for r in rows:
+        slot = gateway.setdefault(r.archetype, [0, 0, 0])
+        slot[0] += 1
+        if r.risk_score is not None:
+            slot[1] += 1
+            slot[2] += r.risk_score >= DENY_BAND
+
+    print()
+    print(f"  {'archetype':<17}{'n':>6}{'baseline fit':>14}{'textbook':>11}"
+          f"{'model only':>12}{'END-TO-END':>12}")
+    for name in sorted(per, key=lambda k: (k in HELD_OUT, k)):
+        n, bf, bt = per[name]
+        gn, scored, flagged = gateway.get(name, [0, 0, 0])
+        model_rate = flagged / scored if scored else 0.0
+        # END-TO-END is what the SYSTEM did — the arithmetic gate plus the policy engine
+        # plus the model. A model-only number understates a per-transaction breach, which is
+        # refused before scoring and carries risk_score NULL by design.
+        denied = sum(1 for r in rows if r.archetype == name and r.decision != "allow")
+        end_to_end = denied / gn if gn else 0.0
+        baseline_rate = bf / max(1, n)
+        # For every archetype but the legitimate one, higher is better. `legit_shopper` is
+        # a FALSE-POSITIVE column and the comparison inverts, so it is never marked here —
+        # a marker that means "wins" in five rows and "loses" in the sixth is a marker that
+        # will be misread from the back of a room.
+        # BOTH comparisons are marked, because they answer different objections and a
+        # sceptic will make the harsher one. "Beats our model" is the fair question about
+        # the model; "beats the system" is the fair question about the product.
+        marker = ""
+        if name != "legit_shopper":
+            if baseline_rate > end_to_end + 0.02:
+                marker = "  <- INCUMBENT BEATS THE SYSTEM"
+            elif baseline_rate > model_rate + 0.02:
+                marker = "  <- incumbent beats our MODEL"
+        print(
+            f"  {name:<17}{n:>6}{baseline_rate:>13.1%}{bt / max(1, n):>11.1%}"
+            f"{model_rate:>11.1%}{end_to_end:>11.1%}{marker}"
+        )
+    print()
+    print("  legit_shopper is a FALSE-POSITIVE row: lower is better and it is never marked.")
+    print("  Its END-TO-END figure is high because most of those denials are")
+    print("  `mandate.category_denied` — the principal did not permit that category. That is")
+    print("  the mandate working, not the model misfiring, and the breakdown is above.")
+    print()
+    print("  `model only` is the risk score alone on requests that REACHED it.")
+    print("  `END-TO-END` is what the system actually did, gate and policy included — a")
+    print("  per-transaction breach is refused by arithmetic before any model runs, and its")
+    print("  record carries risk_score NULL. Comparing a fraud model against our model alone")
+    print("  measures the wrong thing; comparing it against the system is the fair question.")
+
+
+#: Filled by `load_rows`. `decision_records.merchant_id` is not on `Row` because nothing
+#: else needs it; the watermark lookup does.
+_MERCHANT_BY_AGENT: dict[str, str] = {}
+
+
+def _merchant_of(row: Row) -> str:
+    return _MERCHANT_BY_AGENT.get(row.agent_id, "")
+
+
+def _watermarks(dsn: str) -> dict[str, int]:
+    """Per-merchant seq below which the money invariant was not yet enforced."""
+    with psycopg.connect(dsn) as conn:
+        try:
+            return dict(
+                conn.execute(
+                    "SELECT merchant_id, max_seq FROM invariant_baselines "
+                    "WHERE invariant = 'amount_conserved'"
+                ).fetchall()
+            )
+        except psycopg.errors.UndefinedTable:
+            return {}
+
+
+def _features_by_record(dsn: str, attempts: list[dict]) -> dict[str, dict]:
+    ids = [a["decision_id"] for a in attempts if a.get("decision_id")]
+    out: dict[str, dict] = {}
+    with psycopg.connect(dsn) as conn:
+        for start in range(0, len(ids), 500):
+            for record_id, features in conn.execute(
+                "SELECT record_id, features FROM decision_records WHERE record_id = ANY(%s)",
+                (ids[start : start + 500],),
+            ).fetchall():
+                out[str(record_id)] = features or {}
+    return out
+
+
+# ── the numbers that do not depend on the model ─────────────────────────────────────
+
+
+def section_operational(rows: list[Row], dsn: str) -> None:
+    """Latency, invariants, chain, LLM calls, cost.
+
+    `eval/PREDICTIONS.md` prediction 4 registered these as the figures that do not move
+    whatever the held-out run shows, because none of them depends on the traffic. They are
+    printed beside the model numbers so that a poor model result cannot be read as a system
+    result, and a good one cannot launder into one.
+    """
+    rule("OPERATIONAL — none of this depends on the model being any good")
+
+    latencies = sorted(r.latency_us for r in rows if r.latency_us)
+    if latencies:
+        def q(p: float) -> float:
+            return latencies[min(len(latencies) - 1, int(p * len(latencies)))] / 1000
+
+        print(f"  latency (recorded in the row, n={len(latencies)})")
+        print(f"    p50 {q(0.50):6.2f}ms   p95 {q(0.95):6.2f}ms   p99 {q(0.99):6.2f}ms"
+              f"   max {latencies[-1] / 1000:6.2f}ms   budget 25ms")
+        print("    Request start to just before the payload is built. It cannot include its")
+        print("    own INSERT — it is a column in the row being inserted. The gate in")
+        print("    tests/db/test_authorize_latency.py measures the whole pipeline and is")
+        print("    therefore strictly stricter than this figure.")
+
+    from dwaar.invariants import AmountFacts, check_amount_conserved  # noqa: PLC0415
+
+    # Split at the migration-0017 watermark, exactly as `dwaar-verify` does. Records
+    # written before the invariant was enforced are history and are COUNTED; a violation
+    # above the watermark is a failure. Reporting one number for both would either hide a
+    # live defect or condemn the system for rows it can no longer change.
+    watermark = _watermarks(dsn)
+    above = below = 0
+    for r in rows:
+        if not check_amount_conserved(
+            AmountFacts(
+                decision=r.decision,
+                requested_paise=r.amount_paise,
+                stated_paise=r.bounded_amount_paise,
+                budget_before=r.budget_before,
+                budget_after=r.budget_after,
+            )
+        ):
+            continue
+        if r.seq <= watermark.get(_merchant_of(r), 0):
+            below += 1
+        else:
+            above += 1
+    print()
+    print(f"  money invariant violations ABOVE the watermark: {above}   (must be 0)")
+    print(f"  below it, in records written before it was enforced: {below}")
+    print("    what the ledger moved == what the decision stated, with the BOUND amount as")
+    print("    the stated amount. dwaar/invariants.py. Found F-043 on its first run:")
+    print("    throttle and step_up were reserving budget for decisions that permitted")
+    print("    nothing. Those rows are inside signed payloads and cannot be corrected, so")
+    print("    they are counted on every run rather than forgiven once.")
+
+    llm_rows = sum(1 for r in rows if "llm" in " ".join(r.stages).lower())
+    print()
+    print(f"  LLM calls in the request path: {llm_rows}   (must be 0)")
+    print("    Rule 1. Enforced three ways in CI — import closure, runtime, source scan.")
+
+    with psycopg.connect(dsn) as conn:
+        merchants = [
+            m for (m,) in conn.execute(
+                "SELECT DISTINCT merchant_id FROM decision_records "
+                "WHERE agent_id = ANY(%s)", ([r.agent_id for r in rows[:1000]],)
+            ).fetchall()
+        ]
+    from dwaar.verify_cli import verify  # noqa: PLC0415
+
+    findings = verify(dsn, merchant=merchants[0] if len(merchants) == 1 else None)
+    print()
+    print(f"  chain verification: {'PASS' if findings.ok else 'FAIL'}   "
+          f"{findings.checked.get('decision_records.chain', 0):,} records")
+    if findings.legacy:
+        total = sum(findings.legacy.values())
+        print(f"    {total} record(s) below the migration-0017 watermark do not conserve")
+        print(f"    money: {findings.legacy}. Counted, not hidden — F-038 and F-043.")
+
+    # Cost. The gateway makes no model calls per decision; the only per-decision cost is
+    # compute. Stated as what it is rather than converted into a headline saving.
+    print()
+    print("  cost per 1,000 decisions")
+    print("    LLM tokens:        0    — no model call occurs in the request path")
+    print("    ONNX inference:  ~2ms of CPU per decision, in-process, no network")
+    print("    The explainer calls Gemini asynchronously and caches by (rule, decision,")
+    print("    band), so a burst of N identical denials costs ONE call, not N. That is a")
+    print("    property of the cache key, not a projection: see dwaar/explain/cache.py.")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--manifest", default=None)
@@ -445,8 +861,15 @@ def main() -> int:
     # Deliberately NOT the bootstrap manifests. Those were generated with the model unloaded
     # so it could be trained on traffic it had not shaped (F-031); measuring against them
     # would report a system that does not exist.
+    # `heldout-*` as well as `eval-*`: both are traffic run against the gateway with the
+    # model loaded and enforcing, which is the system being measured. Bootstrap manifests are
+    # deliberately excluded — they were generated with the model unloaded so it could be
+    # trained on traffic it had not shaped (F-031), and measuring against them would report a
+    # system that does not exist.
     manifests = (
-        [Path(args.manifest)] if args.manifest else sorted(TRAFFIC_DIR.glob("eval-*.jsonl"))
+        [Path(args.manifest)]
+        if args.manifest
+        else sorted(TRAFFIC_DIR.glob("eval-*.jsonl")) + sorted(TRAFFIC_DIR.glob("heldout-*.jsonl"))
     )
     if not manifests:
         print(
@@ -476,9 +899,12 @@ def main() -> int:
     section_importances(bundle)
     section_components(bundle)
     section_per_archetype(rows)
+    section_held_out(rows)
     section_false_positives(rows)
     section_injection(rows)
     section_enforcement(rows)
+    section_baseline(manifests, args.dsn, rows)
+    section_operational(rows, args.dsn)
 
     print()
     print("─" * 78)

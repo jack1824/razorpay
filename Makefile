@@ -23,7 +23,7 @@ TRAFFIC_SEED ?= 20260828
 EVAL_SEED ?= 20260901
 
 .PHONY: help up down logs migrate bootstrap-local seed traffic traffic-eval train \
-        train-injection explainer \
+        train-injection explainer traffic-heldout lock-inputs \
         test test-db lint fmt verify eval demo demo-restore clean
 
 help:
@@ -36,6 +36,8 @@ help:
 	@echo "  make seed      regenerate data/seed/ + .keys/ (deterministic)"
 	@echo "  make traffic       bootstrap traffic for TRAINING (gateway must run model-free)"
 	@echo "  make traffic-eval  evaluation traffic for MEASURING (gateway runs normally)"
+	@echo "  make traffic-heldout  the same PLUS the two held-out archetypes"
+	@echo "  make lock-inputs      record bundle hashes + SHAs before a held-out run"
 	@echo "  make train     train the risk model from decision_records + the run manifest"
 	@echo "  make train-injection   fit the injection detector's weights"
 	@echo "  make test      run the full test suite"
@@ -112,6 +114,25 @@ traffic-eval:
 # in one process. Refuses to write a bundle if any single feature separates the archetypes.
 train:
 	$(PY) -m tools.train_risk --seed $(TRAFFIC_SEED)
+
+# HELD-OUT traffic: the four development archetypes plus `compromised` and `sleeper`.
+#
+# Those two default to ZERO agents in zoo/run.py, so every run before evaluation day
+# generated traffic without them and nothing invoked them by accident. That default is what
+# makes their first run against a loaded model actually a first run.
+#
+# One run, reported. Re-running until the number improves is how a held-out set becomes a
+# validation set, and there is no second one.
+traffic-heldout:
+	$(PY) -m zoo.run --legit 30 --card-tester 4 --budget-breacher 4 --injector 4 \
+	  --compromised 4 --sleeper 4 \
+	  --requests 40 --seed $(EVAL_SEED) \
+	  --out data/traffic/heldout-$(EVAL_SEED).jsonl
+
+# Record what a held-out run is a test OF: bundle hashes, feature ordering, seeds, the
+# approved policy version and the SHA of both worktrees. Run BEFORE the traffic.
+lock-inputs:
+	$(PY) -m tools.lock_inputs
 
 # The injection detector's weights. Fitted over composed templates with the benign side
 # drawn from the real product catalogue — including SKU9001, whose name opens with the

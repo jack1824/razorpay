@@ -1496,3 +1496,90 @@ and now this. Each time the suite was green and `make verify` was the only thing
 noticed. That is why `make verify` moved into CI in this phase rather than remaining
 something someone runs, and why the CI step asserts the row COUNT and not just the verdict:
 a verifier with nothing to verify prints the same PASS as one that checked everything.
+
+---
+
+### F-048 — Agent identities are positional, so two runs relabelled each other's records — FIXED in the analysis
+
+**Found:** while reading the held-out results, because `make eval` reported `compromised` at
+**43.3%** and the raw analysis of the same run reported **18.8%**.
+
+Agent identities are derived as:
+
+```python
+agent_id = f"agt_{_slug(seed, 'agent', index)}"   # sha256(f"{seed}:agent:{index}")
+```
+
+`kind` is the literal string `'agent'`. The archetype is **not** in the hash, so an identity is
+`(seed, position in the plan)`. `build_plan` iterates `sorted(counts)`, so adding two
+archetypes to a run shifts the position of every later one — and the same `agent_id` is a
+`legit_shopper` in one run and a `compromised` in the next.
+
+`eval-20260901` and `heldout-20260901` share a seed and differ in mix. All 42 agents of the
+first run reappear in the second under different archetypes. `decision_records` holds both
+runs' rows for those ids, and the report joined on `agent_id`.
+
+**The wrong number looked entirely reasonable**, which is the only reason this is worth
+writing down. 43.3% is a plausible held-out recall. Nothing about it invited a second look
+except that a figure computed two ways disagreed.
+
+**Fix:** the analysis joins on `decision_id`, which the manifest records per attempt and which
+names the exact row that request produced. A record now belongs to exactly the run that caused
+it. `eval/baseline.py` had the same defect twice over — a merged archetype map, and a stateful
+scorecard whose per-agent window spanned both runs eleven hours apart, which crushed its
+velocity term and had it reading 49.7% on card testers where its real figure is 99.4%. Both
+fixed; each manifest is now its own stream with its own labels.
+
+**Deliberately NOT fixed: the identity derivation.** Putting the archetype into the hash is
+the right change and it is a change to code inside `eval/LOCKED_INPUTS.md`. The held-out run
+had already happened. Editing the generator afterwards would break the one property the lock
+exists to provide — that the code which produced the result is the code the hashes name.
+Recorded for after the evaluation, alongside F-045.
+
+**The pattern, for the third time in two days:** a number that is wrong and looks fine is only
+caught by computing it a second way. F-033 (a latency figure measuring a short-circuited
+pipeline), F-044 (an expectation matching a measurement taken from dirty state), and now this.
+None was caught by a test. All three were caught by two paths to one number disagreeing.
+
+---
+
+### F-049 — `compromised`'s resale ramp is not monotone on every seed — OPEN, deliberately not fixed
+
+**Found:** by the held-out session's own test, on the first full suite run after the merge —
+which is the first time it could have run, since the file was branched until evaluation day.
+
+```
+assert shares["ordinary"] < shares["probing"] < shares["extraction"]
+E  assert 0.2545454545454545 < 0.22580645161290322      # seed 17
+```
+
+`compromised` is specified as ramping continuously through a probing window rather than
+flipping in one request, because an archetype that flipped would be posing an easier question
+than the evaluation is asking. On seed 17 the probing phase's resale share sits *below* the
+ordinary phase's, so the ramp is not monotone on that measure.
+
+**It did not touch the result.** All four seeds the run actually used —
+`20260901008` … `20260901011` — ramp monotonically, checked explicitly and recorded:
+
+```
+index 8   ordinary=0.136  probing=0.290  extraction=0.898   monotone
+index 9   ordinary=0.182  probing=0.419  extraction=0.864   monotone
+index 10  ordinary=0.255  probing=0.355  extraction=0.847   monotone
+index 11  ordinary=0.255  probing=0.387  extraction=0.881   monotone
+```
+
+**Deliberately not fixed.** The agent ran on the 31st and `eval/RESULTS.md` reports what it
+did. Editing the thing that was measured after measuring it is F-044's failure mode, and this
+would be a worse instance of it, because a held-out set cannot be regenerated — a second run
+against a tuned agent measures the tuning.
+
+Marked `xfail(strict=True)` on seed 17 alone, so the assertion stays live on every other seed
+**and turns red again the moment somebody does fix the agent**. A non-strict xfail or a
+widened tolerance would have made the finding disappear, which is the outcome this repository
+keeps deciding is worse than a red mark.
+
+**One thing this vindicates.** The held-out session wrote behavioural assertions about its own
+agents and nothing about whether the model catches them — its docstring says a test asserting
+"the detector flags `sleeper`" would close the feedback loop the isolation exists to prevent.
+Because of that discipline, this failure is readable as a statement about the archetype rather
+than as pressure to change a threshold.

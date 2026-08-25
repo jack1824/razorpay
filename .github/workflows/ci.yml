@@ -110,6 +110,12 @@ jobs:
       #
       # It runs AFTER the suite, over whatever the suite committed, so it verifies real
       # records rather than an empty table.
+      # If this step fails immediately after a green suite, the most likely cause is an
+      # INTERRUPTED earlier run rather than a real tamper: `tests/db/test_verify_cli.py`
+      # deliberately rewrites signed columns and cleans up in fixture teardown, and teardown
+      # does not survive a killed process. In CI the database is created fresh per job, so
+      # this cannot happen here — the note is for whoever runs `make verify` locally after
+      # hitting Ctrl-C. See FAILURES.md F-047.
       - name: make verify — the independent verifier, over what the suite just wrote
         run: make verify
 

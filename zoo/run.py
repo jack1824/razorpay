@@ -154,6 +154,11 @@ async def main_async(args: argparse.Namespace) -> int:
         "card_tester": args.card_tester,
         "budget_breacher": args.budget_breacher,
         "injector": args.injector,
+        # The held-out pair. Default ZERO, so every run before 31 August generated traffic
+        # without them and nothing invoked them by accident — which is the property that
+        # makes their first run against a loaded model actually a first run.
+        "compromised": args.compromised,
+        "sleeper": args.sleeper,
     }
     counts = {name: n for name, n in counts.items() if n > 0}
     if not counts:
@@ -270,6 +275,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--card-tester", type=int, default=3, dest="card_tester")
     parser.add_argument("--budget-breacher", type=int, default=3, dest="budget_breacher")
     parser.add_argument("--injector", type=int, default=3)
+    # Held out until evaluation day. Default 0, and stated as such: a flag that defaults to
+    # a non-zero count would have put these agents into training traffic the first time
+    # anyone ran the zoo without reading the help text.
+    parser.add_argument(
+        "--compromised", type=int, default=0,
+        help="HELD OUT. Written without sight of dwaar/risk/; first run 31 Aug",
+    )
+    parser.add_argument(
+        "--sleeper", type=int, default=0,
+        help="HELD OUT. Written without sight of dwaar/risk/; first run 31 Aug",
+    )
     parser.add_argument("--out", default=None)
     parser.add_argument(
         "--dsn",
