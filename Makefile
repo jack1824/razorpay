@@ -11,6 +11,22 @@ PY ?= $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo 
 export DATABASE_URL_MIGRATE ?= postgresql://dwaar_owner:owner_pw@localhost:5432/dwaar
 export DATABASE_URL_APP     ?= postgresql://dwaar_app:app_pw@localhost:5432/dwaar
 export DATABASE_URL_SUPERUSER ?= postgresql://postgres:postgres_pw@localhost:5432/dwaar
+export DATABASE_URL_EXPLAINER  ?= postgresql://dwaar_explainer:explainer_pw@localhost:5432/dwaar
+export REDIS_URL               ?= redis://localhost:6379/0
+
+# ── Why these exports exist, and why every demo command goes through make ───────────
+#
+# `.env` carries DOCKER service hostnames — `postgres`, `redis` — because that is what the
+# API resolves inside Compose. From the host they do not resolve at all, so anything run
+# directly with `python -m ...` fails with
+#
+#     failed to resolve host 'postgres': nodename nor servname provided
+#
+# and the fix people reach for is a command line full of DSN overrides, remembered wrong at
+# the worst moment. Every target below inherits these instead. `?=` means a real environment
+# variable still wins, so Compose and CI are unaffected.
+#
+# THE RULE FOR DEMO DAY: run `make <target>`, never `python -m <module>`.
 
 # One integer reproduces the whole zoo: identities, request streams, and the split the
 # trainer uses. Overridable so a second run can be generated without colliding with the
@@ -23,7 +39,8 @@ TRAFFIC_SEED ?= 20260828
 EVAL_SEED ?= 20260901
 
 .PHONY: help up down logs migrate bootstrap-local seed traffic traffic-eval train \
-        train-injection explainer traffic-heldout lock-inputs \
+        train-injection explainer traffic-heldout lock-inputs demo-seed demo-ready \
+        demo-reset \
         test test-db lint fmt verify eval demo demo-restore clean
 
 help:
@@ -49,6 +66,8 @@ help:
 	@echo ""
 	@echo "  make verify    verify the decision chain"
 	@echo "  make eval      the honest numbers (importances, components, FP cost)"
+	@echo "  make demo-seed     load data/seed/ + drive a chain for the console"
+	@echo "  make demo-reset    clear mch_demo0001 (needed if a signed fixture changed)"
 	@echo "  make demo      drive demo beats 1-6 on the timeline's own schedule"
 	@echo "  make demo-restore  undo beat 6's tamper"
 	@echo "  make explainer     run the async explainer (EXPLAINER_ARGS=--no-model)"
@@ -84,6 +103,47 @@ bootstrap-local:
 # fixture instead of the generator. Regenerate; never hand-edit.
 seed:
 	$(PY) -m tools.gen_seed --out data/seed --seed 20260905
+
+# Load data/seed/ into the database and drive a believable chain in front of the console:
+# the timeline's purchase beats, then demo beat 7's three MCP tool calls.
+#
+# Uses the REAL scorer, detector and Redis observation store — the same three the API builds
+# at startup. It used to build none of them, and every row it wrote carried
+# `risk_model_unavailable` with a NULL score, so the console showed NULL on every decision
+# and looked like a broken gateway. See scripts/seed_db.py.
+#
+# ROUNDS defaults to 4 so the console's fifty-row window is entirely fresh data rather than
+# a mix of this and whatever ran last.
+# Remove the demo merchant's fixtures and chain, as the OWNER.
+#
+# This deletes from an append-only table, which needs saying out loud. `decision_records` is
+# append-only to the APPLICATION — dwaar_app holds SELECT and INSERT and owns nothing, which
+# is the control. The owner can always delete, and that is not a hole: an audit log that its
+# own DBA cannot administer is not an audit log, it is a disk that fills up. What the design
+# claims is that a change cannot happen UNDETECTED, and `make verify` still says so after
+# this runs — the chain simply starts again from seq 1.
+#
+# Scoped to mch_demo0001 and its agents. It touches no zoo traffic, no eval run and nothing
+# eval/RESULTS.md reports.
+#
+# Needed when a signed fixture in data/seed/ changes: identities there are keyed on the seed
+# rather than on content, so an edited mandate keeps its id and the stored row wins.
+demo-reset:
+	@echo "removing mch_demo0001's fixtures and chain (owner role)..."
+	psql "$(DATABASE_URL_MIGRATE)" -v ON_ERROR_STOP=1 -q -f scripts/demo-reset.sql
+	@echo "done. now: make demo-seed"
+
+ROUNDS ?= 4
+demo-seed:
+	@$(PY) -c "import sys; sys.exit(0)" || { echo "no interpreter"; exit 1; }
+	$(PY) -m scripts.seed_db "$(DATABASE_URL_APP)" $(ROUNDS)
+
+# Everything the demo needs, from a running stack, in one command.
+demo-ready: demo-seed
+	@echo ""
+	@echo "  console data seeded. Now:"
+	@echo "    make demo          drive beats 1-6 on the timeline's schedule"
+	@echo "    beat 7 is manual   — the MCP panel is already populated"
 
 # Real signed HTTP against a running local instance. NOT a fixture replay: the gateway
 # computes its own features from its own rolling windows, so the training distribution is

@@ -138,9 +138,24 @@ def test_mandate_hash_matches_its_canonical_json(generated):
 
 
 def test_canonical_json_contains_all_ten_signed_fields(generated):
+    """Ten required keys, plus `scopes` — which is present because these mandates carry one.
+
+    `scopes` is the single OPTIONAL field (migration 0015): present in the canonical payload
+    iff the column is non-NULL. The rule it bends is "materialise every default", and it is
+    allowed to because the discriminator is the nullness of a column that the signer and the
+    verifier both read off the same row, not a default either might reason about differently.
+
+    Asserted as an exact set rather than a subset. A subset check would pass if a future
+    field were silently added to what every signature covers, which is the one change to this
+    payload that can never be undone — records are chained and mandates are signed.
+    """
     for mandate in generated["mandates"]:
         payload = json.loads(mandate["canonical_json"])
-        assert set(payload) == set(mandatemod.SIGNED_FIELDS)
+        assert set(payload) == set(mandatemod.SIGNED_FIELDS) | {"scopes"}
+        assert payload["scopes"] == sorted(payload["scopes"]), (
+            "JCS sorts object KEYS, never array elements, so scope order is inside the "
+            "signature and two callers listing them differently would produce two mandates"
+        )
 
 
 def test_mandate_satisfies_schema_checks(generated):
@@ -149,6 +164,25 @@ def test_mandate_satisfies_schema_checks(generated):
         assert mandate["max_per_txn_paise"] > 0
         assert mandate["max_per_txn_paise"] <= mandate["max_total_paise"]
         assert mandate["substitution_tolerance"] in {"none", "same_price", "similar"}
+
+
+def test_every_demo_mandate_delegates_collection_and_not_outbound_money(generated):
+    """Demo beat 7, as a fixture assertion.
+
+    `create_refund` for ₹40,000 against a ₹50,000 cap must be refused on DIRECTION, not on
+    amount. If these mandates ever delegated `money.outbound`, the beat would still deny —
+    on the amount — and would be demonstrating a spending limit rather than a delegation
+    model, which is the distinction the whole proxy exists to make.
+    """
+    from dwaar.mcp.scopes import OUTBOUND_SCOPES
+
+    for mandate in generated["mandates"]:
+        scopes = set(mandate["scopes"])
+        assert "collect.create" in scopes, "the beat needs a permitted collection to contrast"
+        assert not scopes & OUTBOUND_SCOPES, (
+            f"{mandate['mandate_id']} delegates {scopes & OUTBOUND_SCOPES}; beat 7 would "
+            "then deny create_refund on its amount and prove nothing about scope"
+        )
 
 
 def test_mandate_nonces_are_unique(generated):

@@ -8,18 +8,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_vjzs6d0ik7eu\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_ow0xevubo0gh\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"2a3cd7e7ce4e4b6036e3dbc9\",\"principal_id\":\"prn_ba6hyf9x47ud\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_vjzs6d0ik7eu\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_ow0xevubo0gh\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"2a3cd7e7ce4e4b6036e3dbc9\",\"principal_id\":\"prn_ba6hyf9x47ud\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "a28bf7941059f2970127b6ff8d2e67a9594188e9567bfed5a255c77ed7a2498c",
+    "mandate_hash": "54b64d07b141869be298e3a736c3eb7befb2cd893b05e38c338630de99a1b29d",
     "mandate_id": "mnd_ow0xevubo0gh",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "2a3cd7e7ce4e4b6036e3dbc9",
     "principal_id": "prn_ba6hyf9x47ud",
-    "signature": "af3bb56048ca3861fb85e5324474ef6d1ff92fc132373c5493345d0c3985168fcce317d7ccc10ea9f8d84a8479a5f0ebbc934e945eb4e37b28807a3425139e01",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "8a7f2c6b6cb3040d4c9331c463e12d73fdc13881caecc027035fa073963040c6f0765c2de1b824549b300149eb65a2eee89122444920a2d158bef9a6cc067900",
     "substitution_tolerance": "same_price"
   },
   {
@@ -31,18 +35,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_tjtsci51500o\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_3oa3t882ndyq\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"92677566e1c554aa1351defe\",\"principal_id\":\"prn_bdxzh39kf494\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_tjtsci51500o\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_3oa3t882ndyq\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"92677566e1c554aa1351defe\",\"principal_id\":\"prn_bdxzh39kf494\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "b0942e7e2e954023c2494ae59026073ed54392ab70319ca3d8c7a4a4bb636354",
+    "mandate_hash": "94753a79e3604443a57aa758d8ce896a1407eb35039f6bafb2e210807d5a51ba",
     "mandate_id": "mnd_3oa3t882ndyq",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "92677566e1c554aa1351defe",
     "principal_id": "prn_bdxzh39kf494",
-    "signature": "40d5f5cc769d96224aad2743a869dbe758bf5873eec70f8c7de25b6d926c346c90210099c9b94d62f3aee122c69ab6f930e0d2f725a4fc21d9e16ca87b7f8a0c",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "29c71488e2d1f0982451a27c4abc657df7baf17f6e50896690b89f359f92e850dc37e96be65dc3e73dc8dd4c89c107cf825198b9a426b283d02933b0fd1e6a0d",
     "substitution_tolerance": "same_price"
   },
   {
@@ -54,18 +62,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_xkxo79wpt4hd\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_5kw3tt8yjki9\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"b9ac3ff4aab46301c162183b\",\"principal_id\":\"prn_4b3k8ex4ksj7\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_xkxo79wpt4hd\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_5kw3tt8yjki9\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"b9ac3ff4aab46301c162183b\",\"principal_id\":\"prn_4b3k8ex4ksj7\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "0eb0df119fe6834fa4bf65c5fbca2cadbb7faa1929055ad69d2cc1062f5bed82",
+    "mandate_hash": "b3665c13b808dddf26aed26477825549e50ed22d9e11f9953d2f25a11829602b",
     "mandate_id": "mnd_5kw3tt8yjki9",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "b9ac3ff4aab46301c162183b",
     "principal_id": "prn_4b3k8ex4ksj7",
-    "signature": "25a9b19c1886cc32250e7ccf345c967ffc6652998881666283f466e5a354d60f6b3727a52a125ce2763f47fde9d4b81f2d54226d8a2ece7cdf6332bac0e20e0b",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "881e657c98ac2313bcbb83258b74e119a591b2f4e42c7c310b1a4116c9b1a604cec9b72e5fedd866c4e468c565807f4d0b2a6e2952466a5323155126dbad7804",
     "substitution_tolerance": "same_price"
   },
   {
@@ -77,18 +89,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_hs1aqdg8cesw\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_6uu4enufr0pp\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"2da91713895dedccdad0e67a\",\"principal_id\":\"prn_7xad9bvy5pod\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_hs1aqdg8cesw\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_6uu4enufr0pp\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"2da91713895dedccdad0e67a\",\"principal_id\":\"prn_7xad9bvy5pod\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "2bf46a00561f044106be1741c58054b5ac9c038ce3f65c93fdb919775b6aa2f9",
+    "mandate_hash": "b85d69d5efc8236b25007de61abb1ec3b3ddf83423ed36b9fde4615155275f2a",
     "mandate_id": "mnd_6uu4enufr0pp",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "2da91713895dedccdad0e67a",
     "principal_id": "prn_7xad9bvy5pod",
-    "signature": "139bad5ffc237a7eea5f75e68dc45122341b1738c8722a5c708ff13d339bd5507e5c66abd613d6f29fe6ba87b23c25382a582b00bab388956f164001a42e880c",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "785da9beb0f19122394b52970a0f93e3005cb224040702bf65b973d76f151a03f161bbdcbfe7da30ef8cbaca916932e008fbae3cae2ee6a2b8dc804d22a5b90a",
     "substitution_tolerance": "same_price"
   },
   {
@@ -100,18 +116,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_s2ibfngskuwr\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_1urtztfu1lv5\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"72789fdf585a8c828ced814f\",\"principal_id\":\"prn_dyb6l1rd9y2a\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_s2ibfngskuwr\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_1urtztfu1lv5\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"72789fdf585a8c828ced814f\",\"principal_id\":\"prn_dyb6l1rd9y2a\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "876222a1315a7b9170d174d892ce125fa23b291948be7895df118eb2e831ca40",
+    "mandate_hash": "71c36f841b0d2fa69796ee5871ccae78baf88163236a8c5e81cc94eeb0ea7662",
     "mandate_id": "mnd_1urtztfu1lv5",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "72789fdf585a8c828ced814f",
     "principal_id": "prn_dyb6l1rd9y2a",
-    "signature": "8c47a29246c8b217b5162f16eb3a32a420dddb294e01e29fd32c2392987c78e55436e5d0277650ca23d6091a0fe9b8088a5e4bc0f26deefc548a281bcbd4dd0e",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "00bf9ed60cc034ebd5b889259481e1963e750750046230bc4d5de35aa209eb92f097b037d8537c7c19ece6adfa796801f7b10b75b66dae5060a747c608c9580c",
     "substitution_tolerance": "same_price"
   },
   {
@@ -123,18 +143,22 @@
       "apparel",
       "stationery"
     ],
-    "canonical_json": "{\"agent_id\":\"agt_lszmxqvlebmd\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_uxjinqf0wpoi\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"c7904b92ef6be42c0927d890\",\"principal_id\":\"prn_nko1umo06398\",\"substitution_tolerance\":\"same_price\"}",
+    "canonical_json": "{\"agent_id\":\"agt_lszmxqvlebmd\",\"allow_categories\":[\"groceries\",\"household\",\"personal_care\",\"apparel\",\"stationery\"],\"deny_categories\":[\"gift_cards\"],\"expires_at\":\"2026-10-05T10:00:00+00:00\",\"mandate_id\":\"mnd_uxjinqf0wpoi\",\"max_per_txn_paise\":500000,\"max_total_paise\":5000000,\"nonce\":\"c7904b92ef6be42c0927d890\",\"principal_id\":\"prn_nko1umo06398\",\"scopes\":[\"collect.create\",\"read\"],\"substitution_tolerance\":\"same_price\"}",
     "deny_categories": [
       "gift_cards"
     ],
     "expires_at": "2026-10-05T10:00:00+00:00",
-    "mandate_hash": "ccc5fb8c21618ebc28205dcc3ef1ee15982bf50100b0a82a792982e80b129a59",
+    "mandate_hash": "8ef9c9c5ea2a3752d5a38dca5068228eec656f1014ee8ddcdf430cabf4f00aff",
     "mandate_id": "mnd_uxjinqf0wpoi",
     "max_per_txn_paise": 500000,
     "max_total_paise": 5000000,
     "nonce": "c7904b92ef6be42c0927d890",
     "principal_id": "prn_nko1umo06398",
-    "signature": "a120bf10469b06ebe1e55c298c2b4b14bba819a5afdd5580c8b17639d3b5aed1e258e25a3226fcd92f1e9dc2affa0fbfb8ca3e398aa856f7c2aad9ad301a1c03",
+    "scopes": [
+      "collect.create",
+      "read"
+    ],
+    "signature": "080826f7ca7f6472dc86f3ef6af482509c65d24e0b8d235a15952612680423d31d4300a9a1a974aabde68e741861a8377a8c4c544c55772f53ed3fbc3eaa2e08",
     "substitution_tolerance": "same_price"
   }
 ]

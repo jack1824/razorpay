@@ -12,6 +12,18 @@ prediction is resolved below, including the two that failed.
 
 ---
 
+## The one thing to take from this document
+
+**The model was wrong about two archetypes in two different directions, and not one rupee
+moved that a mandate had not authorised — because spending authority was never the model's to
+decide.**
+
+That is the claim this run supports, and it is the only claim in the project that does not
+depend on traffic we wrote ourselves. Everything below is the evidence for it, including the
+parts where the model does badly, which are the parts that make it evidence at all.
+
+---
+
 ## The short version
 
 **The model's headline number is 92.2% recall on `sleeper`, and it is not a real result.**

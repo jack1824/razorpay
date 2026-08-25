@@ -7,7 +7,54 @@ not reconstructed later. Nothing here is backfilled. If an entry is wrong, it ge
 correction *below* it, never an edit in place — the same rule the decision chain enforces in
 code.
 
+That rule was broken once, and the breach is labelled rather than tidied: **F-029 and F-030
+were reconstructed on 1 September** from their fixes and the code comments that survived
+them. Both had been cited from seven files while the entries themselves did not exist. A
+citation that resolves to nothing is worse than the gap it points at.
+
 Newest entries at the bottom.
+
+---
+
+## How these 49 were found
+
+The distribution is the useful part, and none of it is flattering.
+
+| how | count | |
+|---|---|---|
+| a check written for something **else** | 4 | F-014, F-028, F-036, F-043 |
+| computing one number **two ways** and getting two answers | 6 | F-018, F-034, F-038, F-040, F-047, F-048 |
+| `make verify`, with the test suite green | 6 | F-016, F-018, F-019, F-042, F-043, F-047 |
+| latent in **already-committed** code | 6 | F-014, F-024, F-035, F-038, F-040, F-043 |
+
+**Six were caught by computing a number two ways, and F-048 was the third that was
+wrong-but-plausible.** A latency figure of 2.80ms for a pipeline with two stages
+short-circuited (F-033). A demo expectation rewritten to match a 0.67 measured against an
+uncleared rolling window (F-044). A held-out recall of 43.3% produced by joining two runs on
+an agent identity that is positional rather than content-derived (F-048). **Not one of the
+three was caught by a test.** All three were caught by two paths to one number disagreeing,
+and in every case the wrong number looked entirely reasonable — which is precisely why a
+plausible figure is not evidence that anything works.
+
+**Six were caught by `make verify` while the suite was green** — at one point green across 926
+tests, over five rows a verifier called forged. That is why `make verify` is in CI now, and
+why the CI step asserts the row **count** and not just the verdict: a verifier with nothing to
+verify prints the same PASS as one that checked everything.
+
+**Four were caught by a check written for something else**, which is the whole argument for
+structural checks over targeted ones. F-036 is the clearest: an assertion added for F-033
+failed an hour later for a reason nobody had considered, and the first defect it caught was
+not the one it was written for. A targeted check — "assert a scorer was passed" — would have
+stayed green throughout.
+
+**Six had been live in committed code**, including F-038 (a `bound` decision told an agent
+₹500 and debited ₹1,800, latent for four phases) and F-043 (`throttle` and `step_up` reserving
+budget for decisions that permitted nothing, 1,093 records of it). Both were found by an
+*assertion in the write path*, not by a test. A test proves an invariant held on the cases
+someone thought of; an assertion proves it holds on the cases nobody did.
+
+The counts above are recomputed by reading this file, not typed. `F-006` and `F-016` carry
+multiple headings because each was reopened; they are counted once.
 
 ---
 
@@ -932,6 +979,89 @@ by construction.
 
 ---
 
+### F-029 — The anomaly score put a fixed 20% of legitimate traffic above the deny band — FIXED
+
+> **This entry was reconstructed on 1 September**, from the fix, the code comments that
+> survived it and the measurements it produced. It was never written at the time. That is a
+> failure of the process this document claims to follow — "real-time, never backfilled" — and
+> labelling it is the only honest repair available. It is cited from `dwaar/risk/model.py`,
+> `eval/report.py` and `eval/RESULTS.md`, and a citation that resolves to nothing is worse
+> than the gap it points at.
+
+**Found:** by reading the measured false-positive rate on legitimate traffic and not believing
+it — 25% at the deny band, 54% at the step-up band.
+
+The isolation forest's `decision_function` is higher for more-normal points on a scale with no
+external meaning, so it has to be mapped into `[0, 1]` before a band can be drawn on it. The
+obvious mapping, and the first one tried, was the inverted percentile rank among legitimate
+training scores.
+
+**A percentile rank is uniform on the population it was fitted to.** So `1 - rank` puts
+exactly 20% of legitimate traffic above 0.80 and 45% above 0.55 *no matter how good the forest
+is*. The measured 25% and 54% were not a bad model. They were arithmetic.
+
+That is the part worth keeping: the number was computed correctly at run time, from real
+traffic, and it was still meaningless — because the quantity being measured could not have
+taken any other value. Rule 4 says every number is computed rather than hardcoded. It does not
+say a computed number measures what its label claims.
+
+**Fix:** the rank is compressed into the tail instead. Only the bottom `anomaly_tail` fraction
+of the legitimate distribution scores anything at all, ramping to 1.0 at the most anomalous
+point seen in training, so the expected false-positive rate at the deny band becomes
+`tail x 0.2` rather than `0.2`. The legitimate flag rate went from 32.7% to 0.5%.
+
+**The trade, named rather than buried:** an adversary sitting just inside the legitimate
+distribution now scores zero from this component. That is the correct posture for the half of
+the model whose job is unseen archetypes — silent unless something is genuinely out of family
+— and the held-out run on 31 August then showed exactly that: the anomaly half contributed
+**0.0%** on `sleeper`. Whether that is the right trade is a real question and
+`eval/RESULTS.md` reports it as one.
+
+---
+
+### F-030 — A feature carrying 74% of the model's gain was a coding placeholder — FIXED
+
+> **Reconstructed on 1 September**, on the same terms as F-029 above. This is the most-cited
+> finding in the repository — `dwaar/risk/features.py`, `dwaar/risk/injection.py`,
+> `zoo/HELD_OUT_SPEC.md`, `eval/report.py`, `eval/PREDICTIONS.md`, `eval/RESULTS.md` and
+> `README.md` all point at it — and until now it pointed at nothing.
+
+**Found:** by reading the feature importances, which `make eval` prints on every run for this
+reason.
+
+`cart_mutation_rate` carried **74% of total gain**. The explanation was immediate and it was
+not about behaviour: every adversarial archetype held **one cart identifier for its entire
+run**, because that is how each file happened to be written, while the legitimate shopper
+rotated its cart per session, because that is what a shopper does.
+
+The model had found a coding convention that correlated perfectly with the label.
+
+**The leakage gate did not catch it and could not have.** Cramér's V looks for a feature that
+IS the archetype label. This was a feature that correlated with **how the generator was
+written**, which is a different thing and passes every automated check that exists.
+
+> A leakage threshold catches a feature that IS the label. It does not catch a feature that
+> correlates with how the generator was written, and no automated check will.
+
+**Fix:** cart lifetime became a per-archetype behavioural decision rather than an accident.
+The card tester opens a new cart per attempt, because each card test is its own checkout with
+no basket to revise. The breacher keeps one while probing and takes a fresh one when it
+abandons the probe. The comments recording that reasoning are still in
+`zoo/agents/card_tester.py` and `zoo/agents/budget_breacher.py`.
+
+**What it changed permanently.** The importances are printed on **every** `make eval` run with
+a 40% alarm line, because the only control against this class is a person reading the ranking.
+Rule 5 of `zoo/HELD_OUT_SPEC.md` — *do not copy the four existing agents' conventions* — exists
+entirely because of this entry, and it is the rule that made the held-out result readable.
+
+**It recurred, twice, exactly as predicted.** F-045: `bin_diversity = 0` is a value no training
+request ever carried, because every zoo agent has a card. And the held-out run found
+`inter_arrival_variance` at 68% of gain measuring something real — machine regularity — with a
+conclusion attached that only our traffic supports, since we wrote exactly one regular agent
+and made it a criminal. See `eval/RESULTS.md`.
+
+---
+
 ### F-031 — Training on traffic the previous model shaped is a closed loop — FIXED
 
 **Found:** comparing two consecutive traffic runs. The first, against a gateway with no model
@@ -1583,3 +1713,136 @@ agents and nothing about whether the model catches them — its docstring says a
 "the detector flags `sleeper`" would close the feedback loop the isolation exists to prevent.
 Because of that discipline, this failure is readable as a statement about the archetype rather
 than as pressure to change a threshold.
+
+---
+
+## Closing the record — 1 September
+
+Three entries still carried an `OPEN` heading while the thing they described had been fixed.
+The headings are not edited, because this file corrects below rather than in place; the
+closures are here.
+
+### F-001 — CLOSED
+
+Demo beat 3 requested `gift_cards`, which every mandate denies, so it died on deterministic
+set membership and never reached the risk model — while asserting `expect_rule:
+behavioural_drift`. **The one beat that shows the model earning its place demonstrated the
+opposite.**
+
+Fixed in `tools/gen_seed.py`: beat 3 is now a matched pair in an **allowed** category
+(`apparel`, `SKU9002`) — a warm-up that establishes the agent's normal, then a drift event at
+ten times the ticket and twenty times the velocity, under the per-transaction cap with a valid
+signature and a valid mandate. Nothing deterministic can catch it.
+
+`tests/test_gen_seed.py` asserts the category is in `allow_categories`, that the drift amount
+is below `max_per_txn_paise`, and that the beat expects a **non-null** `risk_score` — the
+exact mirror of beat 2's NULL. `make demo` checks all of it against what the API actually
+returned, on every run.
+
+The rule name changed once afterwards and that is recorded separately as F-044.
+
+### F-002 — CLOSED
+
+Beat 1's note read `"Budget 5000 -> 3760"` for an `amount_paise` of 124000, treating ₹5,000 —
+the **per-transaction** cap — as the balance. The mandate's total is ₹50,000, so the true
+balance after beat 1 is ₹48,760.
+
+Fixed in `tools/gen_seed.py`; the note now reads `Baseline. Budget ₹50,000 -> ₹48,760.` It is
+a caption rather than an assertion, which is why it survived as long as it did — nothing
+executed it. `make demo` now prints the ledger's own `remaining` beside each beat, so the
+number on screen comes from the ledger rather than from a string somebody typed.
+
+### F-006 — CLOSED as superseded, confirmed
+
+The corrected strategy package never arrived. Every defect it blocked was fixed in this
+repository's own artifacts instead — `data/seed/timeline.json` is generated by
+`tools/gen_seed.py` and guarded by `tests/test_gen_seed.py`, and the demo runs off that rather
+than off anything upstream. Nothing is waiting on it.
+
+---
+
+## What two more weeks would buy
+
+In order. The first item is the one the held-out run made unarguable, and it is a bigger
+finding than anything else on this list.
+
+### 1. Absolute amount, and deviation from an agent's own baseline
+
+The thirteen features are all **window aggregates**: velocity, entropies, diversities, rates.
+Not one of them is a deviation from that agent's own norm.
+
+That is precisely what "this agent stopped behaving like itself" means, and it is the
+definition of both held-out archetypes. `compromised`'s ticket size went from ₹644 to ₹6,330 —
+a tenfold jump inside one agent's own history — and its risk score went **down**, from 0.366
+to 0.185. The model is not weak on that archetype. The vector cannot express it.
+
+`amount_entropy` is not a substitute: it is a dispersion measure over a window, so a step
+change in level raises it briefly and then it settles, and it cannot express direction at all.
+
+The fraud baseline in `eval/baseline.py` demonstrates the missing feature works — given
+absolute amount and amount-against-own-median, it reaches 96.1% on budget breaching against
+our model's 90.1%. We are losing to a signal we chose not to have.
+
+**This needs retraining**, which is why it was not done between 31 August and now.
+
+### 2. Stop treating regularity as adversarial
+
+`inter_arrival_variance` carries 68% of total gain. The held-out run showed the feature is
+real — an isolated author reasoning only about behaviour independently produced low variance —
+and that the **conclusion attached to it is ours**. A standing order is regular. A cron job is
+regular. Four training archetypes contained exactly one regular agent and it was a criminal.
+
+The fix is not a smaller weight. It is more *legitimate* regular agents in the training
+traffic: a subscription biller, a replenishment robot that never defects, a payroll run. Then
+regularity stops being a label and starts being a feature.
+
+### 3. F-045 — a presence indicator per optional feature
+
+A request with no instrument produces `bin_diversity = 0`, a value no training request ever
+carried, and the anomaly model reads a fabricated zero as an extreme observation. **A payout
+has no card by nature** and scores as an outlier for that reason alone. `to_vector()` fills
+every slot; `to_natural()` deliberately does not, and the model side has the wrong one of the
+two behaviours.
+
+Needs retraining. Registered in `eval/PREDICTIONS.md` before the held-out run, where it turned
+out not to fire — every held-out request carried a card.
+
+### 4. F-048 — content-derived identities in the zoo
+
+Agent identities are `sha256(seed:'agent':index)`. Positional, so two runs on one seed with
+different archetype mixes reuse an identity for different archetypes. Putting the archetype
+into the hash costs one line and removes a whole class of analysis error.
+
+### 5. F-010 — actually run `docker compose up`
+
+The single largest gap in the repository. The Compose stack has been written and never
+executed, because Docker is not installed on the development machine. Everything else was
+verified against a real PostgreSQL 16 through the `bootstrap-local` path, and the two
+role-creation scripts must agree that `dwaar_app` owns nothing — a drift there removes the
+append-only control in one environment and leaves it in the other, silently.
+
+### 6. Release a reservation when a payment fails
+
+`dwaar/api/routes/webhooks.py` records settlement outcomes and deliberately does not act on a
+failure. A reservation is deducted at authorize time, so a failed capture should release it
+with a compensating entry — and releasing against the wrong reservation would hand back budget
+that was genuinely spent, which is worse than not releasing at all. It is stated as
+unimplemented rather than half-built.
+
+### 7. The things that are cut, and stay cut
+
+Merkle anchoring over the hash chain. A policy-compiler UI. SHAP attribution at inference,
+which would put a training framework on the request path and is refused on principle — the
+`top_features` approximation is labelled as an approximation instead.
+
+---
+
+## The one-sentence version
+
+Forty-nine entries, four of them still open — F-005, F-010, F-045 and F-049, each open for
+a stated reason — and the most useful ones are the four where a
+check written for something else caught a defect nobody was looking for. What the held-out run
+finally established is that the model was wrong about two archetypes in two different
+directions and **not one rupee moved that a mandate had not authorised** — because spending
+authority was never the model's to decide, and that separation is the only claim in this
+repository that does not depend on traffic we wrote ourselves.

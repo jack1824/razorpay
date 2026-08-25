@@ -7,7 +7,7 @@
 ```mermaid
 flowchart LR
   BA[Buyer agents]:::ext -->|RFC 9421 signed HTTP| GW
-  MA[Merchant's own agents]:::ext -->|MCP tool calls| PX[MCP proxy]:::soon
+  MA[Merchant's own agents]:::ext -->|MCP tool calls| PX[MCP proxy]:::done
   PX --> GW
 
   subgraph DWAAR["POST /v1/authorize — 8 stages, p99 target 25ms, zero LLM calls"]
@@ -27,13 +27,13 @@ flowchart LR
   end
 
   GW[gateway]:::done --> DWAAR
-  S7 -->|allow| RZP[Razorpay test mode]:::soon
+  S7 -->|allow| RZP[Razorpay test mode]:::done
   S8 --> CH[(decision_records<br/>append-only by GRANT<br/>hash-chained per merchant)]:::done
-  CH --> V[independent verifier CLI]:::soon
-  GW -. async, off-path .-> EX[LLM explainer]:::soon
+  CH --> V[independent verifier CLI]:::done
+  S8 -. outbox, AFTER commit .-> EX[LLM explainer<br/>own DB role · kill it, nothing moves]:::done
   PC[LLM policy compiler<br/>Gemini · OFFLINE · human-gated]:::done -->|signed ruleset| S5
   CON[console]:::done -. SSE .-> GW
-  ZOO[agent zoo<br/>real signed HTTP · localhost only]:::ext -->|traffic| GW
+  ZOO[agent zoo · 6 archetypes<br/>2 held out until 31 Aug]:::ext -->|real signed HTTP| GW
   CH -->|features| TR[offline trainer<br/>labels never enter dwaar/]:::done
   TR -->|ONNX bundle| S4
 
@@ -42,9 +42,30 @@ flowchart LR
   classDef ext  fill:#1a3a5c,stroke:#2d6a9f,color:#fff
 ```
 
-<sub>Green = built. Grey = scheduled. Every stage is real as of 27 August: a healthy
-request now carries an <strong>empty</strong> <code>degraded_mode</code>, and every token that
-can still appear names a runtime condition rather than an unbuilt component.</sub>
+<sub>Everything green is built and running. A healthy request carries an
+<strong>empty</strong> <code>degraded_mode</code>; every token that can still appear names a
+runtime condition rather than an unbuilt component. The dotted line from the gate to the
+decision is the short-circuit that makes <code>risk_score IS NULL</code> structural — on a
+per-transaction breach, stages 3 to 6 never run and the record proves it.</sub>
+
+---
+
+## Everything here is measured against synthetic traffic that we wrote
+
+Stated first because it is the dominant limitation and burying it would be the single most
+misleading thing this document could do.
+
+All six agent archetypes are ours. Two of them — `compromised` and `sleeper` — were written
+in a session with no access to `dwaar/risk/`, no sight of the feature list and no thresholds,
+kept on a branch, and run against the model exactly once, on 31 August. That narrows the
+problem. **It does not eliminate it, and it is isolation rather than independent authorship:
+this was a solo build.**
+
+**The model was wrong about both held-out archetypes, in opposite directions**, and
+[`eval/RESULTS.md`](eval/RESULTS.md) leads with that rather than with a recall table.
+
+What is **not** synthetic: the cryptography, the ledger arithmetic, the decision records, the
+latency measurements, and the Razorpay calls, which are real test-mode calls.
 
 ---
 
@@ -90,30 +111,108 @@ make bootstrap-local   # same two roles, same ownership, as the Compose init scr
 make test
 ```
 
-`make verify` is real. `make eval` and `make demo` exist and **exit 2** — they are not
-implemented yet. A stub that exits 0 is a green light for something that does not exist, which is the
-same failure mode as a hardcoded metric.
+```bash
+make demo-seed   # load data/seed/ and drive a chain the console can show
+make demo        # beats 1-6 on the timeline's own schedule, expectations asserted
+make verify      # the independent verifier — separate process, read-only connection
+make eval        # the honest numbers, every one computed at run time
+```
 
-> **`make up` is currently unverified.** Docker is not installed on the development machine
-> (`/usr/local/bin/docker` is a dangling symlink to a removed Docker Desktop). The Compose
-> stack is written but has never been executed. Everything else below was verified against a
-> real PostgreSQL 16.14 via the `bootstrap-local` path. Tracked as **F-010** in
-> `FAILURES.md` — including the specific drift risk it leaves between the two role-creation
-> scripts.
+**Run demo commands through `make`, never `python -m`.** `.env` carries Docker service
+hostnames because that is what the API resolves inside Compose; from the host they do not
+resolve at all. Every target exports localhost DSNs, and `?=` means a real environment
+variable still wins, so Compose and CI are unaffected.
+
+`verify`, `eval` and `demo` all exited 2 until the thing behind them existed. A stub that
+exits 0 is a green light for something that is not there, which is the same failure mode as a
+hardcoded metric. All three are now real; `tests/test_absence_controls.py` keeps the
+mechanism for the next one.
+
+> **`make up` is still unverified, and that is the largest single gap in this repository.**
+> Docker is not installed on the development machine, so the Compose stack has been written
+> and never executed. Everything else below was verified against a real PostgreSQL 16 via the
+> `bootstrap-local` path — 1,051 tests, the latency gates, the chain verifier and the demo all
+> run there. Tracked as **F-010**, including the drift risk it leaves between the two
+> role-creation scripts, which are required to agree that `dwaar_app` owns nothing.
+
+## What this project does not claim
+
+Read this before the rest. A reviewer who knows where the floor is reads everything above it
+more carefully, not less.
+
+**The behavioural model does not detect compromised agents.** On the two archetypes it had
+never seen it scored 18.8% and 92.2%, and the second number is the worse of the two.
+**90.2% of `sleeper`'s flags land in the period it is behaving impeccably** — the model is not
+catching the defection, it dislikes the agent. On `compromised` the score goes *down* when the
+agent defects: 0.366 before, 0.185 after, while the ticket size goes from ₹644 to ₹6,330. The
+feature vector has no absolute amount and no measure against an agent's own baseline, so the
+thing that defines that archetype is invisible to it.
+
+We predicted this failure mode on 28 August, in `eval/PREDICTIONS.md`, before the agents were
+written. That ordering is in the git history and it is the only reason the diagnosis is worth
+anything.
+
+**A conventional fraud baseline beats us on one archetype and ties us on another.** Given the
+absolute amount — a signal we deliberately do not have — a fitted scorecard reaches 96.1% on
+budget breaching against our model's 90.1%, and ties us at 99.4% on card testing. Its fitted
+weights come out *negative* on the textbook card-testing signals, which is a fact about our
+synthetic traffic rather than about fraud, and **that applies to our model exactly as much.**
+
+**One feature carries 68% of the model's gain, and its meaning is our convention.**
+`inter_arrival_variance` is a real signal — an isolated author reasoning only about behaviour
+independently produced it. What is ours is the *conclusion* attached to it. Regularity is not
+adversarial: a standing order is regular, a cron job is regular. We trained on four archetypes
+containing exactly one regular agent and made it a criminal.
+
+**Every accuracy figure here is a measurement of our own generator.** `make eval` prints the
+feature importances on every run with a 40% alarm line, because no automated check catches a
+feature that correlates with how the generator was written. F-030 and this are two instances
+of the same class.
+
+### What the run does support
+
+| | measured |
+|---|---|
+| a per-transaction breach denied by arithmetic, model never consulted | **495 arithmetic denials, 0 carrying a score** |
+| money invariant above the migration-0017 watermark | **0 violations** |
+| chain verification over every signed table | **PASS** |
+| `injection_flag` distinguishes unchecked from checked-and-clean | **0 disagreements** across 4,369 records |
+| no language model reachable from the request path | **0**, enforced three independent ways |
+| injection detector, held-out payloads | **10/10 caught, 0/5 benign lookalikes flagged** |
+
+**The model was wrong about two archetypes in two different directions, and not one rupee
+moved that a mandate had not authorised — because spending authority was never the model's to
+decide.** That separation is the design, and the held-out run is the strongest evidence for it
+in the project.
+
+## What to read, and what is in it
+
+| | |
+|---|---|
+| [`eval/RESULTS.md`](eval/RESULTS.md) | the held-out run: what the model got wrong, why, the fraud-baseline comparison, and every caveat |
+| [`eval/PREDICTIONS.md`](eval/PREDICTIONS.md) | five predictions registered **before** the run. Two failed. Committed 28 August — check the timestamp |
+| [`eval/LOCKED_INPUTS.md`](eval/LOCKED_INPUTS.md) | bundle hashes, seeds and both worktree SHAs, recorded before the agents ran. The model has not moved since |
+| [`zoo/HELD_OUT_SPEC.md`](zoo/HELD_OUT_SPEC.md) | the entire input to the isolated session. Behavioural terms only — no feature names, no thresholds |
+| [`DEFENSE.md`](DEFENSE.md) | nine decisions that are not obvious, each with the alternative it rejected and what it costs |
+| [`FAILURES.md`](FAILURES.md) | 49 defects, written as they were found and never backfilled. The most useful document here |
+| [`FAIL_MATRIX.md`](FAIL_MATRIX.md) | what every component does when it dies, written before any decision code |
+| [`THREAT_MODEL.md`](THREAT_MODEL.md) | fifteen threats, also written before any decision code |
 
 ## Status
 
-Phases 1–5 are complete: repository, data model, a working `POST /v1/authorize` that
-verifies real RFC 9421 signatures and chains every decision it renders, an independent
-verifier, a deterministic policy engine with an offline LLM compiler, and a live console.
+Every phase is complete. `POST /v1/authorize` verifies real RFC 9421 signatures and chains
+every decision it renders; the MCP proxy enforces delegated scopes through the same
+arithmetic gate; Razorpay test-mode orders are bounded by the ledger reservation; the async
+explainer runs in its own process under its own database role; and the held-out evaluation has
+been run once and reported.
 
-**Deadline is 2 September.** Nine days, not fourteen.
+**Deadline is 2 September.**
 
 | Built | |
 |---|---|
 | `POST /v1/authorize` — 8 stages + arithmetic gate, per-stage timing | ✅ |
 | Signed, hash-chained decision records + chain verification | ✅ |
-| Latency gates in CI: pipeline p99 **4.08ms** vs a 25ms budget | ✅ |
+| Latency gates in CI: pipeline p99 **7.37ms** serial, **20.61ms** under load, vs 25ms | ✅ |
 | RFC 9421 inbound verification, key rotation overlap, replay defence | ✅ |
 | `make verify` — independent verifier, read-only, no write path | ✅ |
 | Idempotency scoped per mandate, namespaced against forgery | ✅ |
@@ -125,7 +224,7 @@ verifier, a deterministic policy engine with an offline LLM compiler, and a live
 | Structured JSON logging, per-request trace IDs, PII allowlist | ✅ |
 | `GET /health` | ✅ |
 | Schema as migrations, `decision_records` append-only **by GRANT** | ✅ |
-| Repository layer, six tables | ✅ |
+| Repository layer, no ORM, integer paise everywhere | ✅ |
 | Budget ledger — atomic, idempotent, 50-writer clean | ✅ |
 | Per-merchant hash chain with explicit `seq` allocation | ✅ |
 | Import isolation + hot-path purity + ground-truth isolation tests | ✅ |
@@ -134,22 +233,24 @@ verifier, a deterministic policy engine with an offline LLM compiler, and a live
 | `make eval` — importances, components separately, false-positive cost | ✅ |
 | Behavioural features — Redis windows keyed on (agent, principal) | ✅ |
 | Risk model — LightGBM + isolation forest, ONNX, pre-warmed | ✅ |
-| Agent zoo — four archetypes, real signed HTTP, localhost only | ✅ |
+| Agent zoo — six archetypes, two held out until 31 Aug, localhost only | ✅ |
 | Every stage real: `degraded_mode` empty on a healthy request | ✅ |
 
-| Scheduled | Date |
+| Also built | |
 |---|---|
-| Held-out archetypes — separate session, see `zoo/HELD_OUT_SPEC.md` | 28 Aug |
-| Razorpay test mode + MCP proxy | 29 Aug |
-| Async explainer, `make demo`, remaining console panels | 30 Aug |
-| `make eval` + fraud baseline + first held-out run | 31 Aug |
-| Hardening, README, video | 1 Sep |
+| MCP proxy — delegated scopes, unlisted tools denied, same chain | ✅ |
+| Razorpay test mode — order amount derived from the ledger reservation | ✅ |
+| Async explainer — own process, own DB role, killing it changes no decision | ✅ |
+| `make demo` — beats 1–6 on the timeline's schedule, expectations asserted | ✅ |
+| Console — chain verifier, MCP enforcement, per-component health | ✅ |
+| The money invariant — write path, database trigger, and the verifier | ✅ |
+| `dwaar/clock.py` — one time seam, checked by a source scan | ✅ |
+| Held-out run — executed once, reported in `eval/RESULTS.md` | ✅ |
 
-Cut deliberately, not "if behind": policy-compiler UI (CLI only), change-point detection for
-the sleeper, Merkle anchoring (hash chain only), console screen 6.
-
-See **`DEFENSE.md`** for six decisions that are not obvious, each with the alternative it
-rejected and what it costs.
+Cut deliberately, not "if behind": policy-compiler UI (CLI only), Merkle anchoring (hash
+chain only), and — the one that matters — **within-agent baseline features**, which the
+held-out run then showed to be the single largest gap in the model. That is written up at the
+end of `FAILURES.md` rather than presented as a roadmap.
 
 ## Reading the feature importances is a required step
 
@@ -291,11 +392,12 @@ Both are same-host numbers with a local database. They are not a claim about pro
 
 ## Data disclosure
 
-All agent traffic is **synthetic**, generated by `zoo/` making real signed HTTP calls — not
-replayed fixtures. Risk-model training data is synthetic and that is the dominant
-limitation of the evaluation; it is stated here rather than buried. Cryptography, ledger
-arithmetic, decision records and latency measurements are **real**. Razorpay calls are real
-**test-mode** calls.
+Stated at the top of this document as well, because it is the dominant limitation. All agent
+traffic is **synthetic**, generated by `zoo/` making real signed HTTP calls — not replayed
+fixtures. Cryptography, ledger arithmetic, decision records and latency measurements are
+**real**. Razorpay calls are real **test-mode** calls, and the console renders a SIMULATED
+badge from `/health` whenever an integration is stubbed, so nobody can describe a stub as a
+live integration by accident.
 
 **UAP is a proposal pending RBI approval.** It is modelled and labelled, never claimed as
 integrated.
@@ -303,21 +405,28 @@ integrated.
 ## Layout
 
 ```
-dwaar/            the service. never imports zoo.
-  api/            FastAPI app, middleware, routes
-  db/             pool, migration runner, repositories (no ORM)
-  money.py        integer paise. no float, anywhere.
-  logging.py      structlog JSON, trace IDs, allowlist redaction
-migrations/       numbered SQL. 0009 is the append-only control.
-tests/            including the three structural tests
-zoo/              agent archetypes. localhost only. sibling, never imported.
-tools/gen_seed.py  deterministic fixture + keypair generator
-data/seed/         its output. regenerate, never hand-edit.
-docs/
-  adr/0001-…      the Phase 1-2 decisions
-THREAT_MODEL.md   written before any decision code
-FAIL_MATRIX.md    written before any decision code
-FAILURES.md       real-time, never backfilled
+dwaar/              the service. never imports zoo.
+  api/              FastAPI app, middleware, routes
+  authorize/        the pipeline: eight stages plus the arithmetic gate
+  crypto/           RFC 9421, JCS, Ed25519, the signed-blob/column registry
+  db/               pool, migration runner, repositories (no ORM)
+  mcp/              scope map + proxy. one authorization path, not a second one.
+  policy/           closed-operator DSL, compiler, engine, baseline bands
+  risk/             features, observations, model, injection detector
+  explain/          the async explainer. blocklisted from every request path.
+  outbox.py         publishes a record id after commit. NOT in explain/ — see DEFENSE 6.
+  invariants.py     the money invariant. one rule, three enforcement points.
+  clock.py          the only wall clock. checked by tests/test_clock_seam.py.
+  money.py          integer paise. no float, anywhere.
+migrations/         numbered SQL. 0009 is the append-only control; 0017 is the money invariant.
+tests/              1,051 of them, including six structural checks
+zoo/                six agent archetypes. localhost only. sibling, never imported.
+tools/gen_seed.py   deterministic fixture + keypair generator
+tools/demo.py       drives the timeline and asserts every expectation
+tools/lock_inputs.py  what a held-out run is a test OF
+eval/               report, fraud baseline, predictions, locked inputs, results
+data/seed/          generator output. regenerate, never hand-edit.
+console/            React. five screens. reads the chain, never a parallel view.
 ```
 
 `THREAT_MODEL.md`, `FAIL_MATRIX.md`, `FAILURES.md` and `docs/adr/` are this repo's own

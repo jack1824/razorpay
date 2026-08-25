@@ -72,6 +72,15 @@ HELD_OUT = {"compromised", "sleeper"}
 ALLOW_CATEGORIES = ["groceries", "household", "personal_care", "apparel", "stationery"]
 DENY_CATEGORIES = ["gift_cards"]
 
+#: What every demo mandate delegates: read, and the power to COLLECT money. Not the
+#: power to move it outward.
+#:
+#: This is demo beat 7 in one line. `create_refund` for ₹40,000 is refused against a
+#: mandate whose cap is ₹50,000 — the amount is fine and the DIRECTION is not, which is
+#: the distinction a spending limit alone cannot express. Sorted, because JCS sorts
+#: object keys and never array elements, so the order is inside the signature.
+DELEGATED_SCOPES = sorted(["read", "collect.create"])
+
 MAX_TOTAL_PAISE = 5_000_000      # ₹50,000
 MAX_PER_TXN_PAISE = 500_000      # ₹5,000
 
@@ -117,7 +126,16 @@ def build(seed: int, keys_dir: Path | None) -> dict[str, list]:
             "public_key": keymod.public_bytes(principal_key).hex(),
         })
 
-        # The signed payload: all ten keys, defaults materialised. ADR item 9.
+        # ── Delegated scopes, signed by the principal like every other term ─────────
+        #
+        # Demo beat 7 needs a mandate that permits collection and NOT outbound money, so
+        # `create_refund` is refused on the mandate's own terms rather than on its amount.
+        # Every demo mandate gets the same pair: these are shopping agents, and a shopping
+        # agent that can issue refunds is the delegation nobody would write down.
+        #
+        # NOT a special seventh agent. Adding one would shift no identity — they are derived
+        # per index — but a fixture that exists only to make one panel populate is a fixture
+        # that stops matching the story it illustrates. This is what these agents are for.
         payload = mandatemod.build_payload(
             mandate_id=mandate_id,
             principal_id=principal_id,
@@ -129,6 +147,7 @@ def build(seed: int, keys_dir: Path | None) -> dict[str, list]:
             substitution_tolerance="same_price",
             expires_at=EPOCH + timedelta(days=30),
             nonce=hashlib.sha256(f"{mandate_id}{seed}".encode()).hexdigest()[:24],
+            scopes=DELEGATED_SCOPES,
         )
         canonical = mandatemod.canonical_json(payload)
         digest = mandatemod.mandate_hash(payload)
