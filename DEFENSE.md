@@ -151,6 +151,15 @@ being caught. Only one of them can be demonstrated.
 which is the property being claimed — and it is a weaker property than immutability, stated
 plainly rather than implied.
 
+**The same boundary, a second time.** Migration 0017's money invariant was written as a
+`CHECK` constraint first — the idiom migration 0014 uses — and the build failed within the
+minute, because a `CHECK` governs `UPDATE` as well as `INSERT` and
+`UPDATE decision_records SET amount_paise` *is* demo beat 6. The invariant would have blocked
+the tamper it needs to succeed. It is a `BEFORE INSERT` trigger now, which is the correct
+scope: the invariant is about what the **application writes**, and column tampering is already
+the signature's job. A control scoped wider than the gap it closes eventually blocks something
+it was never aimed at. See FAILURES.md F-046.
+
 ---
 
 ## 4. The per-transaction cap is checked before scoring, not inside `reserve()`

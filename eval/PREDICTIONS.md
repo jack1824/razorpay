@@ -115,6 +115,45 @@ what Prediction 1 shows.
 This is the cleanest experiment available, because a convention cannot change halfway through
 one agent's run and a behaviour can.
 
+## Prediction 5 — the `bin_diversity` confound (added 31 August, before the run)
+
+Registered late and registered anyway, because the alternative is explaining it afterwards.
+
+**The mechanism.** F-045: a request carrying no `instrument_bin` produces `bin_diversity = 0`.
+Every request in the training traffic carried a card, so the fitted isolation forest has never
+seen that value and reads a fabricated 0 as an extreme observation. Measured, on the current
+bundle, for an otherwise identical first request:
+
+```
+no card:    risk 0.7054   anomaly 0.7054   -> step_up
+with card:  risk 0.2999   anomaly 0.1489   -> permit
+```
+
+The defect is in the feature layer, not the model. `to_vector()` fills every slot, so a
+feature that was never *measured* becomes a 0 that reads as a measurement of zero — the exact
+distinction `to_natural()` exists to preserve on the rules side.
+
+**The prediction.** If `compromised` or `sleeper` issue **payouts, refunds, or purchases
+without an instrument**, their anomaly scores will be inflated for a reason that has nothing
+to do with their behaviour, and held-out recall will look **better than it is**. The
+confounded records are identifiable exactly: `features->>'bin_diversity' = '0'`.
+
+**So the held-out numbers will be reported twice** — once over all records, once excluding
+records where `bin_diversity = 0` — and the gap between them is the size of the confound.
+
+**If every held-out request carries a card**, the confound never fires, the two figures are
+identical, and we say so. That outcome is as informative as the other and is why this is
+written before the numbers are read rather than after.
+
+**This does not get fixed first.** Changing feature computation the day before the run would
+change what the run measures, and the run is the only evidence that the model generalises at
+all. Three candidate fixes are recorded in FAILURES.md F-045 for afterwards.
+
+**Direction of the bias is stated, which is the part that matters.** It inflates recall on
+adversaries and inflates the false-positive rate on legitimate traffic. A confound whose
+direction is only worked out after seeing which way the numbers went is not a confound anyone
+should believe.
+
 ## Prediction 4 — what will NOT move
 
 Stated so that a good result on the above is not allowed to launder into a broader claim.
