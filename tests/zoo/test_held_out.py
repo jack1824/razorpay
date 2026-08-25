@@ -48,6 +48,19 @@ REQUESTS = 200
 #: unlucky. Widening one to make it pass would be the tell that the behaviour changed.
 SEEDS = (3, 17, 90210, 20260827)
 
+#: Seeds on which `compromised`'s probing phase does not sit strictly between its ordinary
+#: and extraction phases on the resale-share measure. FOUND AFTER THE HELD-OUT RUN — see
+#: FAILURES.md F-049.
+#:
+#: The agent is deliberately NOT fixed. It ran on 31 August and the result is recorded;
+#: editing the thing that was measured after measuring it is the failure this project has
+#: already recorded once (F-044), and it would be a worse instance because the held-out set
+#: cannot be regenerated.
+#:
+#: All four seeds the run actually used — 20260901008 through 20260901011 — ramp
+#: monotonically, checked and recorded, so the finding does not touch the reported numbers.
+NON_MONOTONE_RESALE_SEEDS = frozenset({17})
+
 
 def identity(suffix: str = "held00") -> AgentIdentity:
     return AgentIdentity(
@@ -106,10 +119,34 @@ def test_neither_is_labelled_legitimate():
 
 
 def test_neither_is_wired_into_the_runner_defaults():
-    """They are invoked explicitly on evaluation day, never by running `python -m zoo.run`."""
-    source = (__import__("pathlib").Path("zoo/run.py")).read_text(encoding="utf-8")
-    assert "compromised" not in source
-    assert "sleeper" not in source
+    """They are invoked explicitly on evaluation day, never by running `python -m zoo.run`.
+
+    ── This assertion was rewritten AFTER the held-out run, and the change is narrowed ──
+
+    It was written before evaluation day as `"compromised" not in zoo/run.py` — with the
+    archetypes absent from the runner entirely, nothing could invoke them by accident, and
+    a substring search was the bluntest possible way to say so. On evaluation day they have
+    to be invocable, so `--compromised` and `--sleeper` were added and this went red. The
+    guard caught the change, which is what it was for.
+
+    What it was protecting is NOT "the runner never mentions them". It is **nothing invokes
+    them without being asked**, and that property is unchanged: both flags default to zero,
+    so every run before evaluation day generated traffic without them and `python -m zoo.run`
+    still does.
+
+    So the assertion moved to the parser's actual defaults, which is a stronger check than a
+    substring search — it survives a rename, and it would fail if someone gave either flag a
+    non-zero default, which the original could not detect.
+    """
+    from zoo.run import build_parser
+
+    defaults = vars(build_parser().parse_args([]))
+    for archetype in sorted(HELD_OUT):
+        assert defaults[archetype] == 0, (
+            f"--{archetype} defaults to {defaults[archetype]}, not 0. A held-out archetype "
+            "with a non-zero default lands in training traffic the first time anyone runs "
+            "the zoo without reading the help text, and there is no second held-out set."
+        )
 
 
 # ── the mandate holds for both, for their whole lives ───────────────────────────────
@@ -230,7 +267,28 @@ def test_compromised_ticket_sizes_move_upward(seed, catalogue):
     assert median(extraction) > median(ordinary) * 8
 
 
-@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize(
+    "seed",
+    [
+        pytest.param(
+            seed,
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "F-049: the resale-share ramp is not monotone on this seed. Found AFTER "
+                    "the held-out run; the agent is deliberately not fixed, because editing "
+                    "the thing that was measured after measuring it is F-044's failure with "
+                    "a set that cannot be regenerated. Marked per-seed and strict, so the "
+                    "assertion stays live on every other seed AND this turns red again the "
+                    "moment somebody does fix it."
+                ),
+            ),
+        )
+        if seed in NON_MONOTONE_RESALE_SEEDS
+        else seed
+        for seed in SEEDS
+    ],
+)
 def test_compromised_tests_the_water_before_it_commits(seed, catalogue):
     """The takeover is not instantaneous: probing sits between the two, on every measure.
 
